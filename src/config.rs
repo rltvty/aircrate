@@ -8,6 +8,7 @@ pub struct WindowConfig {
     pub y: i32,
     pub width: f32,
     pub height: f32,
+    pub monitor_index: Option<usize>,
 }
 
 impl Default for WindowConfig {
@@ -17,6 +18,7 @@ impl Default for WindowConfig {
             y: 100,
             width: 1200.0,
             height: 800.0,
+            monitor_index: None,
         }
     }
 }

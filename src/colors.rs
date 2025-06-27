@@ -4,7 +4,7 @@ use bevy::prelude::*;
 pub struct AirCrateColors;
 
 impl AirCrateColors {
-    pub fn background_purple() -> Color       { Color::hsla(266.0, 0.51, 0.20, 1.0) }
+    pub fn background_purple() -> Color       { Color::hsla(266.0, 0.51, 0.20, 0.5) }
     pub fn gradient_magenta_start() -> Color  { Color::hsla(316.0, 0.50, 0.55, 1.0) }
     pub fn gradient_magenta_end() -> Color    { Color::hsla(330.0, 1.00, 0.75, 1.0) }
     pub fn dark_blue_ui_panel() -> Color      { Color::hsla(254.0, 0.53, 0.16, 1.0) }
