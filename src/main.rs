@@ -1,13 +1,31 @@
-use bevy::{color::palettes::css::*, prelude::*};
+use bevy::{color::palettes::css::*, prelude::*, window::{WindowResolution, WindowPosition, MonitorSelection}};
 
 mod colors;
+mod config;
+mod window_manager;
+
 use colors::AirCrateColors;
+use config::AppConfig;
+use window_manager::{WindowManager, restore_window_position, track_window_changes, save_window_state_on_exit};
 
 
 fn main() {
+    let config = AppConfig::load();
+    
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "AirCrate".into(),
+                position: WindowPosition::Centered(MonitorSelection::Primary),
+                resolution: (config.window.width, config.window.height).into(),
+                resizable: true,
+                ..default()
+            }),
+            ..default()
+        }))
+        .insert_resource(WindowManager::new())
         .add_systems(Startup, setup)
+        .add_systems(Update, (restore_window_position, track_window_changes, save_window_state_on_exit))
         .run();
 }
 
