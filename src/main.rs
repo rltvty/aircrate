@@ -8,7 +8,7 @@ mod audio;
 use colors::AirCrateColors;
 use config::AppConfig;
 use window_manager::{WindowManager, restore_window_position, track_window_changes, save_window_state_on_close};
-use audio::{AudioPlugin, StartStreamEvent, FLUX_STREAM_URL};
+use audio::{AudioPlugin, StartStreamEvent, StopStreamEvent, AudioStreamManager, FLUX_STREAM_URL};
 
 
 fn main() {
@@ -40,7 +40,13 @@ fn main() {
         .add_plugins(bevy_tokio_tasks::TokioTasksPlugin::default())
         .insert_resource(WindowManager::new())
         .add_systems(Startup, setup)
-        .add_systems(Update, (restore_window_position, track_window_changes, save_window_state_on_close, handle_ui_buttons))
+        .add_systems(Update, (
+            restore_window_position, 
+            track_window_changes, 
+            save_window_state_on_close, 
+            handle_ui_buttons,
+            update_button_appearance
+        ))
         .run();
 }
 
@@ -71,6 +77,7 @@ fn setup(mut commands: Commands) {
                     ..default()
                 },
                 TextColor(Color::WHITE),
+                PlayButtonText,
             ));
         })
         .id();
@@ -139,20 +146,69 @@ fn setup(mut commands: Commands) {
 #[derive(Component)]
 struct PlayButton;
 
+#[derive(Component)]
+struct PlayButtonText;
+
 fn handle_ui_buttons(
-    mut interaction_query: Query<&Interaction, (Changed<Interaction>, With<PlayButton>)>,
+    mut interaction_query: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<PlayButton>)>,
     mut start_stream_events: EventWriter<StartStreamEvent>,
+    mut stop_stream_events: EventWriter<StopStreamEvent>,
+    audio_manager: Res<AudioStreamManager>,
 ) {
-    for interaction in interaction_query.iter_mut() {
+    for (interaction, mut background_color) in interaction_query.iter_mut() {
         match *interaction {
             Interaction::Pressed => {
-                println!("Play button pressed!");
-                start_stream_events.write(StartStreamEvent {
-                    url: FLUX_STREAM_URL.to_string(),
-                    recording_directory: Some(std::path::PathBuf::from("./recordings")),
-                });
+                if audio_manager.is_playing {
+                    println!("Stop button pressed!");
+                    stop_stream_events.write(StopStreamEvent);
+                } else {
+                    println!("Play button pressed!");
+                    start_stream_events.write(StartStreamEvent {
+                        url: FLUX_STREAM_URL.to_string(),
+                        recording_directory: Some(std::path::PathBuf::from("./recordings")),
+                    });
+                }
             }
-            _ => {}
+            Interaction::Hovered => {
+                *background_color = if audio_manager.is_playing {
+                    BackgroundColor(AirCrateColors::thumbs_down_red())
+                } else {
+                    BackgroundColor(AirCrateColors::thumbs_up_blue())
+                };
+            }
+            Interaction::None => {
+                *background_color = if audio_manager.is_playing {
+                    BackgroundColor(AirCrateColors::double_up_pink())
+                } else {
+                    BackgroundColor(AirCrateColors::highlight_neon_blue())
+                };
+            }
+        }
+    }
+}
+
+fn update_button_appearance(
+    audio_manager: Res<AudioStreamManager>,
+    mut button_query: Query<&mut BackgroundColor, (With<PlayButton>, Without<Interaction>)>,
+    mut text_query: Query<&mut Text, With<PlayButtonText>>,
+) {
+    if audio_manager.is_changed() {
+        // Update button background color
+        for mut background_color in button_query.iter_mut() {
+            *background_color = if audio_manager.is_playing {
+                BackgroundColor(AirCrateColors::double_up_pink())
+            } else {
+                BackgroundColor(AirCrateColors::highlight_neon_blue())
+            };
+        }
+        
+        // Update button text
+        for mut text in text_query.iter_mut() {
+            **text = if audio_manager.is_playing {
+                "Stop Recording".to_string()
+            } else {
+                "Play Stream".to_string()
+            };
         }
     }
 }

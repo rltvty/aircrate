@@ -25,10 +25,17 @@ impl Plugin for AudioPlugin {
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct AudioStreamManager {
     pub is_playing: bool,
     pub current_url: Option<String>,
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+}
+
+impl Default for AudioStreamManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AudioStreamManager {
@@ -36,11 +43,16 @@ impl AudioStreamManager {
         Self {
             is_playing: false,
             current_url: None,
+            cancel_token: None,
         }
     }
     
     pub fn start_stream(&mut self, url: &str, recording_path: Option<&str>, runtime: &bevy_tokio_tasks::TokioTasksRuntime) {
         self.stop_stream();
+        
+        // Create new cancellation token for this stream
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.cancel_token = Some(cancel_token.clone());
         
         println!("Starting HTTP stream with recording from: {}", url);
         if let Some(path) = recording_path {
@@ -80,7 +92,7 @@ impl AudioStreamManager {
                     let mut chunk_count = 0;
                     let mut total_bytes = 0;
                     
-                    while reader.is_active().await {
+                    while reader.is_active().await && !cancel_token.is_cancelled() {
                         if let Some(chunk_result) = reader.read_chunk().await {
                             match chunk_result {
                                 Ok(chunk) => {
@@ -115,6 +127,12 @@ impl AudioStreamManager {
                             println!("Stream ended");
                             break;
                         }
+                        
+                        // Check for cancellation
+                        if cancel_token.is_cancelled() {
+                            println!("Stream cancelled");
+                            break;
+                        }
                     }
                     
                     // Final flush and close
@@ -138,8 +156,15 @@ impl AudioStreamManager {
     
     pub fn stop_stream(&mut self) {
         println!("Stopping stream");
+        
+        // Cancel the current stream task if running
+        if let Some(token) = &self.cancel_token {
+            token.cancel();
+        }
+        
         self.is_playing = false;
         self.current_url = None;
+        self.cancel_token = None;
     }
 }
 

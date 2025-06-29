@@ -116,6 +116,7 @@ dependencies = [
  "serde_json",
  "symphonia",
  "tokio",
+ "tokio-util",
  "toml",
 ]
 
