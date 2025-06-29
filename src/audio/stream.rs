@@ -4,11 +4,22 @@ use std::path::PathBuf;
 #[derive(Event)]
 pub struct StartStreamEvent {
     pub url: String,
-    pub recording_directory: Option<PathBuf>,
 }
 
 #[derive(Event)]
 pub struct StopStreamEvent;
+
+#[derive(Event)]
+pub struct StartAudioEvent;
+
+#[derive(Event)]
+pub struct StopAudioEvent;
+
+#[derive(Event)]
+pub struct StartRecordingEvent;
+
+#[derive(Event)]
+pub struct StopRecordingEvent;
 
 #[derive(Component)]
 pub struct StreamState {
@@ -32,26 +43,46 @@ impl Default for StreamState {
 pub fn handle_stream_events(
     mut start_events: EventReader<StartStreamEvent>,
     mut stop_events: EventReader<StopStreamEvent>,
+    mut start_audio_events: EventReader<StartAudioEvent>,
+    mut stop_audio_events: EventReader<StopAudioEvent>,
+    mut start_recording_events: EventReader<StartRecordingEvent>,
+    mut stop_recording_events: EventReader<StopRecordingEvent>,
     mut audio_manager: ResMut<crate::audio::AudioStreamManager>,
     runtime: Res<bevy_tokio_tasks::TokioTasksRuntime>,
 ) {
     for event in start_events.read() {
         println!("Starting stream: {}", event.url);
-        
-        let recording_path = event.recording_directory.as_ref().map(|dir| {
-            // Determine file extension based on URL for proper playback
-            let extension = if event.url.contains("stream.mp3") { "mp3" } else { "aac" };
-            let filename = format!("aircrate_recording_{}.{}", 
-                chrono::Utc::now().format("%Y%m%d_%H%M%S"), extension);
-            dir.join(filename).to_string_lossy().to_string()
-        });
-        
-        audio_manager.start_stream(&event.url, recording_path.as_deref(), &runtime);
+        audio_manager.start_stream(&event.url, &runtime);
     }
     
     for _event in stop_events.read() {
         println!("Stopping stream");
         audio_manager.stop_stream();
+    }
+    
+    for _event in start_audio_events.read() {
+        if audio_manager.is_streaming && !audio_manager.is_playing_audio {
+            if let Some(_audio_sender) = audio_manager.audio_sender.clone() {
+                let audio_cancel_token = tokio_util::sync::CancellationToken::new();
+                audio_manager.audio_cancel_token = Some(audio_cancel_token.clone());
+                
+                // Just set the playing state - the audio thread is already running
+                println!("Starting audio playback");
+                audio_manager.is_playing_audio = true;
+            }
+        }
+    }
+    
+    for _event in stop_audio_events.read() {
+        audio_manager.stop_audio_playback();
+    }
+    
+    for _event in start_recording_events.read() {
+        audio_manager.start_recording();
+    }
+    
+    for _event in stop_recording_events.read() {
+        audio_manager.stop_recording();
     }
 }
 
