@@ -48,13 +48,14 @@ impl TrackInfoManager {
         let response = reqwest::get(&self.api_url).await?;
         let track_data: serde_json::Value = response.json().await?;
         
-        // Parse the API response - you may need to adjust this based on the actual API structure
+        // Parse the API response - track info is nested under "trackInfo" object
+        let track_info = &track_data["trackInfo"];
         let track = TrackInfo {
-            title: track_data["title"].as_str().unwrap_or("Unknown").to_string(),
-            artist: track_data["artist"].as_str().unwrap_or("Unknown").to_string(),
-            album: track_data["album"].as_str().map(|s| s.to_string()),
-            duration: track_data["duration"].as_u64().map(|d| d as u32),
-            started_at: track_data["started_at"].as_str().map(|s| s.to_string()),
+            title: track_info["title"].as_str().unwrap_or("Unknown").to_string(),
+            artist: track_info["artistCredits"].as_str().unwrap_or("Unknown").to_string(),
+            album: track_info["release"].as_str().map(|s| s.to_string()),
+            duration: track_info["duration"].as_u64().map(|d| d as u32),
+            started_at: track_data["lastUpdated"].as_str().map(|s| s.to_string()),
         };
         
         Ok(track)
@@ -63,7 +64,7 @@ impl TrackInfoManager {
 
 pub fn update_track_info_system(
     mut track_manager: ResMut<TrackInfoManager>,
-    mut track_changed_events: EventWriter<TrackChangedEvent>,
+    runtime: Res<bevy_tokio_tasks::TokioTasksRuntime>,
 ) {
     if !track_manager.should_update() {
         return;
@@ -72,50 +73,96 @@ pub fn update_track_info_system(
     // Update timestamp
     track_manager.last_update = Some(std::time::Instant::now());
     
-    // Note: This is a simplified version. In a real implementation, you'd want to
-    // use async tasks or a background thread to avoid blocking the main thread
-    println!("Would fetch track info from: {}", track_manager.api_url);
+    let api_url = track_manager.api_url.clone();
+    let current_track = track_manager.current_track.clone();
     
-    // For now, simulate a track change
-    let mock_track = TrackInfo {
-        title: "Sample Track".to_string(),
-        artist: "Sample Artist".to_string(),
-        album: Some("Sample Album".to_string()),
-        duration: Some(240),
-        started_at: Some(chrono::Utc::now().to_rfc3339()),
-    };
-    
-    if let Some(ref current) = track_manager.current_track {
-        // Check if track changed (in real implementation, compare with fetched data)
-        if current.title != mock_track.title {
-            track_changed_events.write(TrackChangedEvent {
-                previous_track: Some(current.clone()),
-                current_track: mock_track.clone(),
-            });
+    runtime.spawn_background_task(move |mut ctx| async move {
+        match reqwest::get(&api_url).await {
+            Ok(response) => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(track_data) => {
+                        let track_info = &track_data["trackInfo"];
+                        let new_track = TrackInfo {
+                            title: track_info["title"].as_str().unwrap_or("Unknown").to_string(),
+                            artist: track_info["artistCredits"].as_str().unwrap_or("Unknown").to_string(),
+                            album: track_info["release"].as_str().map(|s| s.to_string()),
+                            duration: track_info["duration"].as_u64().map(|d| d as u32),
+                            started_at: track_data["lastUpdated"].as_str().map(|s| s.to_string()),
+                        };
+                        
+                        // Check if track changed
+                        let track_changed = match &current_track {
+                            Some(current) => current.title != new_track.title || current.artist != new_track.artist,
+                            None => true,
+                        };
+                        
+                        if track_changed {
+                            println!("Track changed to: {} - {}", new_track.artist, new_track.title);
+                            
+                            // Send track change event back to main thread
+                            ctx.run_on_main_thread(move |ctx| {
+                                // Get previous track info first
+                                let previous_track = {
+                                    let track_manager = ctx.world.resource::<TrackInfoManager>();
+                                    track_manager.current_track.clone()
+                                };
+                                
+                                // Send event
+                                {
+                                    let mut track_changed_events = ctx.world.resource_mut::<Events<TrackChangedEvent>>();
+                                    track_changed_events.send(TrackChangedEvent {
+                                        previous_track,
+                                        current_track: new_track.clone(),
+                                    });
+                                }
+                                
+                                // Update track manager
+                                {
+                                    let mut track_manager = ctx.world.resource_mut::<TrackInfoManager>();
+                                    track_manager.current_track = Some(new_track);
+                                }
+                            }).await;
+                        } else {
+                            // Update current track even if not changed (for timestamp updates)
+                            ctx.run_on_main_thread(move |ctx| {
+                                let mut track_manager = ctx.world.resource_mut::<TrackInfoManager>();
+                                track_manager.current_track = Some(new_track);
+                            }).await;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to parse track info JSON: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch track info: {}", e);
+            }
         }
-    } else {
-        // First track
-        track_changed_events.write(TrackChangedEvent {
-            previous_track: None,
-            current_track: mock_track.clone(),
-        });
-    }
-    
-    track_manager.current_track = Some(mock_track);
+    });
 }
 
 pub fn handle_track_changed(
     mut track_changed_events: EventReader<TrackChangedEvent>,
+    mut audio_manager: ResMut<crate::audio::AudioStreamManager>,
 ) {
     for event in track_changed_events.read() {
         println!("Track changed to: {} - {}", event.current_track.artist, event.current_track.title);
         
-        if let Some(ref prev) = event.previous_track {
-            println!("Previous track was: {} - {}", prev.artist, prev.title);
+        // If we have a previous track and we're currently recording, send save command
+        if let Some(ref prev_track) = event.previous_track {
+            if audio_manager.is_playing {
+                if let Some(ref sender) = audio_manager.save_track_sender {
+                    if let Err(_) = sender.send((prev_track.artist.clone(), prev_track.title.clone())) {
+                        eprintln!("Failed to send save command for track: {} - {}", prev_track.artist, prev_track.title);
+                    } else {
+                        println!("Sent save command for completed track: {} - {}", prev_track.artist, prev_track.title);
+                    }
+                }
+            }
         }
         
-        // TODO: Handle track changes for file splitting
-        // - Close current recording file
-        // - Start new recording file with track info in filename
+        // Update current recording track
+        audio_manager.current_recording_track = Some(event.current_track.clone());
     }
 }

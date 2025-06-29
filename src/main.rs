@@ -8,7 +8,7 @@ mod audio;
 use colors::AirCrateColors;
 use config::AppConfig;
 use window_manager::{WindowManager, restore_window_position, track_window_changes, save_window_state_on_close};
-use audio::{AudioPlugin, StartStreamEvent, StopStreamEvent, AudioStreamManager, FLUX_STREAM_URL};
+use audio::{AudioPlugin, StartStreamEvent, StopStreamEvent, AudioStreamManager, TrackChangedEvent, TrackInfoManager, FLUX_STREAM_URL};
 
 
 fn main() {
@@ -45,7 +45,8 @@ fn main() {
             track_window_changes, 
             save_window_state_on_close, 
             handle_ui_buttons,
-            update_button_appearance
+            update_button_appearance,
+            update_track_display
         ))
         .run();
 }
@@ -82,16 +83,43 @@ fn setup(mut commands: Commands) {
         })
         .id();
 
-    let recent_tracks = commands
+    let current_track_panel = commands
         .spawn((
             Node {
                 width: Val::Px(400.),
                 height: Val::Px(100.),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                padding: UiRect::all(Val::Px(10.)),
                 ..default()
             },
             BorderRadius::all(Val::Px(20.)),
             BackgroundColor(AirCrateColors::dark_blue_ui_panel()),
         ))
+        .with_children(|parent| {
+            // Artist name
+            parent.spawn((
+                Text::new("Unknown Artist"),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(AirCrateColors::primary_text()),
+                CurrentArtistText,
+            ));
+            
+            // Track title
+            parent.spawn((
+                Text::new("Unknown Track"),
+                TextFont {
+                    font_size: 16.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                CurrentTrackText,
+            ));
+        })
         .id();
     
     let border_node = commands
@@ -114,7 +142,7 @@ fn setup(mut commands: Commands) {
                 color: AirCrateColors::border_lines(),
             },
         ))
-        .add_child(recent_tracks)
+        .add_child(current_track_panel)
         .id();
 
     let container = commands
@@ -149,6 +177,12 @@ struct PlayButton;
 #[derive(Component)]
 struct PlayButtonText;
 
+#[derive(Component)]
+struct CurrentArtistText;
+
+#[derive(Component)]
+struct CurrentTrackText;
+
 fn handle_ui_buttons(
     mut interaction_query: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<PlayButton>)>,
     mut start_stream_events: EventWriter<StartStreamEvent>,
@@ -182,6 +216,26 @@ fn handle_ui_buttons(
                 } else {
                     BackgroundColor(AirCrateColors::highlight_neon_blue())
                 };
+            }
+        }
+    }
+}
+
+fn update_track_display(
+    track_manager: Res<TrackInfoManager>,
+    mut artist_query: Query<&mut Text, (With<CurrentArtistText>, Without<CurrentTrackText>)>,
+    mut track_query: Query<&mut Text, (With<CurrentTrackText>, Without<CurrentArtistText>)>,
+) {
+    if track_manager.is_changed() {
+        if let Some(ref track) = track_manager.current_track {
+            // Update artist text
+            for mut text in artist_query.iter_mut() {
+                **text = track.artist.clone();
+            }
+            
+            // Update track text
+            for mut text in track_query.iter_mut() {
+                **text = track.title.clone();
             }
         }
     }
