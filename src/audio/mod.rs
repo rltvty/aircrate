@@ -35,6 +35,7 @@ pub struct AudioStreamManager {
     pub temp_recording_buffer: Vec<u8>,
     pub current_recording_track: Option<crate::audio::TrackInfo>,
     pub save_track_sender: Option<mpsc::Sender<(String, String)>>,
+    pub track_end_offset_seconds: u32, // How many seconds to cut off the end of recordings
 }
 
 impl Default for AudioStreamManager {
@@ -52,6 +53,7 @@ impl AudioStreamManager {
             temp_recording_buffer: Vec::new(),
             current_recording_track: None,
             save_track_sender: None,
+            track_end_offset_seconds: 10, // Default: cut 10 seconds off the end
         }
     }
     
@@ -100,7 +102,7 @@ impl AudioStreamManager {
                             if let Ok(sink) = Sink::try_new(&handle) {
                                 // Buffer to accumulate audio data for better continuity
                                 let mut audio_buffer = Vec::new();
-                                let target_buffer_size = 32768; // 32KB buffer
+                                let target_buffer_size = 131072; // 128KB buffer for smoother playback
                                 
                                 loop {
                                     // Check for cancellation first
@@ -111,26 +113,31 @@ impl AudioStreamManager {
                                     }
                                     
                                     // Try to receive audio chunks with timeout
-                                    match audio_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                                    match audio_rx.recv_timeout(std::time::Duration::from_millis(50)) {
                                         Ok(chunk) => {
                                             // Add chunk to buffer
                                             audio_buffer.extend_from_slice(&chunk);
                                             
-                                            // When we have enough data, try to decode and play
-                                            if audio_buffer.len() >= target_buffer_size {
-                                                let cursor = Cursor::new(audio_buffer.clone());
+                                            // Try to decode when we have enough data
+                                            while audio_buffer.len() >= target_buffer_size {
+                                                // Try to decode a portion of the buffer
+                                                let decode_chunk_size = target_buffer_size;
+                                                let decode_data = audio_buffer.drain(0..decode_chunk_size).collect::<Vec<u8>>();
+                                                
+                                                let cursor = Cursor::new(decode_data);
                                                 match rodio::Decoder::new(cursor) {
                                                     Ok(source) => {
-                                                        sink.append(source);
-                                                        // Clear the buffer after successful decode
-                                                        audio_buffer.clear();
+                                                        // Keep the sink queue well-fed but not overstuffed
+                                                        if sink.len() < 3 {
+                                                            sink.append(source);
+                                                        }
                                                     }
                                                     Err(_) => {
-                                                        // If decode fails, keep accumulating data
-                                                        // But prevent buffer from growing too large
-                                                        if audio_buffer.len() > target_buffer_size * 4 {
-                                                            // Remove first quarter of buffer to make room
-                                                            audio_buffer.drain(0..target_buffer_size);
+                                                        // If decode fails, this might be a partial frame
+                                                        // Put some data back and try with more data next time
+                                                        if audio_buffer.is_empty() {
+                                                            // Only break if we can't decode anything
+                                                            break;
                                                         }
                                                     }
                                                 }
@@ -156,8 +163,10 @@ impl AudioStreamManager {
                         }
                     });
                     
-                    // Create a simple buffer to collect recording data in this task
+                    // Create a buffer with rolling data for offset calculations
                     let mut temp_buffer = Vec::new();
+                    let mut carryover_buffer = Vec::new(); // Data trimmed from previous track
+                    let _stream_start_time = std::time::Instant::now();
                     
                     // Read chunks and optionally record
                     let mut chunk_count = 0;
@@ -167,7 +176,30 @@ impl AudioStreamManager {
                         // Check for save commands (non-blocking)
                         if let Ok((artist, title)) = save_rx.try_recv() {
                             if !temp_buffer.is_empty() {
-                                println!("Saving completed track: {} - {} ({} KB)", artist, title, temp_buffer.len() / 1024);
+                                // Calculate how much data to trim based on offset
+                                let track_end_offset_seconds = 10; // TODO: Get from config
+                                let estimated_bitrate = 128000; // 128 kbps AAC stream
+                                let bytes_per_second = estimated_bitrate / 8; // Convert to bytes
+                                let bytes_to_trim = (track_end_offset_seconds as usize) * bytes_per_second;
+                                
+                                // Trim the end of the recording
+                                let trimmed_size = if temp_buffer.len() > bytes_to_trim {
+                                    temp_buffer.len() - bytes_to_trim
+                                } else {
+                                    temp_buffer.len() / 2 // If calculation is off, just trim half the offset
+                                };
+                                
+                                // Prepare the full track data (carryover + current trimmed data)
+                                let mut full_track_data = Vec::new();
+                                full_track_data.extend_from_slice(&carryover_buffer);
+                                full_track_data.extend_from_slice(&temp_buffer[..trimmed_size]);
+                                
+                                // Save the carryover data from the end of this track for next track
+                                carryover_buffer.clear();
+                                carryover_buffer.extend_from_slice(&temp_buffer[trimmed_size..]);
+                                
+                                println!("Saving completed track: {} - {} ({} KB total, {} KB carryover for next)", 
+                                    artist, title, full_track_data.len() / 1024, carryover_buffer.len() / 1024);
                                 
                                 // Create filename from track info
                                 let safe_artist = sanitize_filename(&artist);
@@ -179,8 +211,8 @@ impl AudioStreamManager {
                                     let _ = std::fs::create_dir_all(parent);
                                 }
                                 
-                                // Save the buffer to file
-                                match std::fs::write(&filename, &temp_buffer) {
+                                // Save the full track data to file
+                                match std::fs::write(&filename, &full_track_data) {
                                     Ok(_) => {
                                         println!("Successfully saved: {}", filename);
                                     }
@@ -189,7 +221,7 @@ impl AudioStreamManager {
                                     }
                                 }
                                 
-                                // Clear the buffer for the new track
+                                // Clear the current buffer for the new track (keeping carryover)
                                 temp_buffer.clear();
                             }
                         }

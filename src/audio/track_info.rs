@@ -30,7 +30,7 @@ impl Default for TrackInfoManager {
         Self {
             current_track: None,
             last_update: None,
-            update_interval: Duration::from_secs(10), // Poll every 10 seconds
+            update_interval: Duration::from_secs(5), // Poll every 5 seconds - be respectful to API
             api_url: crate::audio::stream::FLUX_TRACK_API.to_string(),
         }
     }
