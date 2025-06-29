@@ -115,7 +115,6 @@ impl AudioStreamManager {
                     // Create buffers for sophisticated overlap management
                     let mut temp_buffer = Vec::new();
                     let mut previous_track_overlap = Vec::new(); // Overlap from end of previous track
-                    let mut overlap_history = std::collections::VecDeque::new(); // Rolling buffer for overlap data
                     
                     // Calculate buffer sizes for overlap management
                     let estimated_bitrate = 128000; // 128 kbps AAC stream
