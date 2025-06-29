@@ -3,10 +3,12 @@ use bevy::{color::palettes::css::*, prelude::*, window::{CompositeAlphaMode, Mon
 mod colors;
 mod config;
 mod window_manager;
+mod audio;
 
 use colors::AirCrateColors;
 use config::AppConfig;
 use window_manager::{WindowManager, restore_window_position, track_window_changes, save_window_state_on_close};
+use audio::{AudioPlugin, StartStreamEvent, FLUX_STREAM_URL};
 
 
 fn main() {
@@ -34,15 +36,44 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(AudioPlugin)
+        .add_plugins(bevy_tokio_tasks::TokioTasksPlugin::default())
         .insert_resource(WindowManager::new())
         .add_systems(Startup, setup)
-        .add_systems(Update, (restore_window_position, track_window_changes, save_window_state_on_close))
+        .add_systems(Update, (restore_window_position, track_window_changes, save_window_state_on_close, handle_ui_buttons))
         .run();
 }
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
 
+    // Play button
+    let play_button = commands
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(200.),
+                height: Val::Px(50.),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                margin: UiRect::all(Val::Px(10.)),
+                ..default()
+            },
+            BackgroundColor(AirCrateColors::highlight_neon_blue()),
+            BorderRadius::all(Val::Px(10.)),
+            PlayButton,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("Play Stream"),
+                TextFont {
+                    font_size: 16.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+        })
+        .id();
 
     let recent_tracks = commands
         .spawn((
@@ -78,22 +109,14 @@ fn setup(mut commands: Commands) {
         ))
         .add_child(recent_tracks)
         .id();
-    // let label_node = commands
-    //     .spawn((
-    //         Text::new("Air Crate"),
-    //         TextFont {
-    //             font_size: 9.0,
-    //             ..Default::default()
-    //         },
-    //     ))
-    //     .id();
+
     let container = commands
         .spawn(Node {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
             ..default()
         })
-        .add_children(&[border_node])
+        .add_children(&[play_button, border_node])
         .id();
 
     commands
@@ -111,4 +134,25 @@ fn setup(mut commands: Commands) {
             BackgroundColor(AirCrateColors::background_purple()),
         ))
         .add_child(container);
+}
+
+#[derive(Component)]
+struct PlayButton;
+
+fn handle_ui_buttons(
+    mut interaction_query: Query<&Interaction, (Changed<Interaction>, With<PlayButton>)>,
+    mut start_stream_events: EventWriter<StartStreamEvent>,
+) {
+    for interaction in interaction_query.iter_mut() {
+        match *interaction {
+            Interaction::Pressed => {
+                println!("Play button pressed!");
+                start_stream_events.write(StartStreamEvent {
+                    url: FLUX_STREAM_URL.to_string(),
+                    recording_directory: Some(std::path::PathBuf::from("./recordings")),
+                });
+            }
+            _ => {}
+        }
+    }
 }
