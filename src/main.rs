@@ -4,6 +4,7 @@ mod colors;
 mod config;
 mod window_manager;
 
+use bevy_cobweb_ui::ui_bevy::FlexGrow;
 use colors::AirCrateColors;
 use config::AppConfig;
 use window_manager::{WindowManager, restore_window_position, track_window_changes, save_window_state_on_close};
@@ -43,12 +44,25 @@ fn main() {
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
 
+    let current_stream = commands
+        .spawn((
+            Node {
+                flex_grow: 1.0,
+                margin: UiRect::all(Val::Px(20.)),
+                width: Val::Auto,
+                ..default()
+            },
+            BorderRadius::all(Val::Px(20.)),
+            BackgroundColor(AirCrateColors::dark_blue_ui_panel()),
+        ))
+        .id();
 
     let recent_tracks = commands
         .spawn((
             Node {
-                width: Val::Px(400.),
-                height: Val::Px(100.),
+                flex_grow: 1.0,
+                margin: UiRect::all(Val::Px(20.)),
+                width: Val::Auto,
                 ..default()
             },
             BorderRadius::all(Val::Px(20.)),
@@ -59,12 +73,13 @@ fn setup(mut commands: Commands) {
     let border_node = commands
         .spawn((
             Node {
-                width: Val::Px(500.),
-                height: Val::Px(500.),
+                flex_direction: FlexDirection::Column,
                 border: UiRect::all(Val::Px(10.)),
                 margin: UiRect::all(Val::Px(20.)),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
+                flex_grow: 1.0,
+                align_items: AlignItems::Stretch,
+                justify_content: JustifyContent::Stretch,
+
                 ..default()
             },
             BackgroundColor(MAROON.into()),
@@ -76,7 +91,7 @@ fn setup(mut commands: Commands) {
                 color: AirCrateColors::border_lines(),
             },
         ))
-        .add_child(recent_tracks)
+        .add_children(&[recent_tracks, current_stream])
         .id();
     // let label_node = commands
     //     .spawn((
@@ -87,28 +102,27 @@ fn setup(mut commands: Commands) {
     //         },
     //     ))
     //     .id();
-    let container = commands
-        .spawn(Node {
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .add_children(&[border_node])
-        .id();
+    // let container = commands
+    //     .spawn(Node {
+    //         flex_direction: FlexDirection::Column,
+    //         align_items: AlignItems::Center,
+    //         ..default()
+    //     })
+    //     .add_children(&[border_node])
+    //     .id();
 
-    commands
-        .spawn((
+    let background_container = (
             Node {
                 flex_direction: FlexDirection::Column,
+                flex_wrap: FlexWrap::NoWrap,
                 align_self: AlignSelf::Stretch,
                 justify_self: JustifySelf::Stretch,
-                flex_wrap: FlexWrap::Wrap,
-                justify_content: JustifyContent::FlexStart,
-                align_items: AlignItems::FlexStart,
-                align_content: AlignContent::FlexStart,
                 ..default()
             },
             BackgroundColor(AirCrateColors::background_purple()),
-        ))
-        .add_child(container);
+        );
+
+    commands
+        .spawn(background_container)
+        .add_child(border_node);
 }
