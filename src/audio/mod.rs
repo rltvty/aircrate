@@ -23,11 +23,9 @@ impl Plugin for AudioPlugin {
             .add_event::<TrackChangedEvent>()
             .insert_resource(TrackInfoManager::default())
             .add_systems(Startup, setup_audio_system)
-            .add_systems(Update, (
-                handle_stream_events,
-                update_track_info_system,
-                handle_track_changed,
-            ));
+            .add_systems(Update, handle_stream_events)
+            .add_systems(Update, update_track_info_system)
+            .add_systems(Update, handle_track_changed);
     }
 }
 
@@ -43,7 +41,9 @@ pub struct AudioStreamManager {
     pub current_recording_track: Option<crate::audio::TrackInfo>,
     pub save_track_sender: Option<mpsc::Sender<(String, String, Option<String>)>>,
     pub audio_sender: Option<mpsc::Sender<Bytes>>, // Channel to control audio playback
-    pub track_end_offset_seconds: u32, // How many seconds to cut off the end of recordings
+    pub track_end_offset_seconds: u32, // How many seconds to cut off the end for boundary detection
+    pub overlap_before_seconds: u32,   // How many seconds of previous track to include
+    pub overlap_after_seconds: u32,    // How many seconds of next track to include
 }
 
 impl Default for AudioStreamManager {
@@ -65,7 +65,9 @@ impl AudioStreamManager {
             current_recording_track: None,
             save_track_sender: None,
             audio_sender: None,
-            track_end_offset_seconds: 10, // Default: cut 10 seconds off the end
+            track_end_offset_seconds: 20, // Default: cut 20 seconds off the end for boundary detection
+            overlap_before_seconds: 10,   // Include 10 seconds of previous track
+            overlap_after_seconds: 10,    // Include 10 seconds of next track
         }
     }
     
@@ -110,9 +112,16 @@ impl AudioStreamManager {
                     
                     // Audio will be handled by the separate audio playback thread
                     
-                    // Create a buffer with rolling data for offset calculations
+                    // Create buffers for sophisticated overlap management
                     let mut temp_buffer = Vec::new();
-                    let mut carryover_buffer = Vec::new(); // Data trimmed from previous track
+                    let mut previous_track_overlap = Vec::new(); // Overlap from end of previous track
+                    let mut overlap_history = std::collections::VecDeque::new(); // Rolling buffer for overlap data
+                    
+                    // Calculate buffer sizes for overlap management
+                    let estimated_bitrate = 128000; // 128 kbps AAC stream
+                    let bytes_per_second = estimated_bitrate / 8;
+                    let overlap_before_bytes = (10 * bytes_per_second) as usize; // 10 seconds before
+                    let overlap_after_bytes = (10 * bytes_per_second) as usize;  // 10 seconds after
                     let _stream_start_time = std::time::Instant::now();
                     
                     // Read chunks and optionally record
@@ -123,30 +132,48 @@ impl AudioStreamManager {
                         // Check for save commands (non-blocking) - only if recording is enabled
                         if let Ok((artist, title, artwork_url)) = save_rx.try_recv() {
                             if !temp_buffer.is_empty() {
-                                // Calculate how much data to trim based on offset
-                                let track_end_offset_seconds = 10; // TODO: Get from config
-                                let estimated_bitrate = 128000; // 128 kbps AAC stream
-                                let bytes_per_second = estimated_bitrate / 8; // Convert to bytes
+                                // Calculate track boundaries with DJ-friendly overlaps
+                                let track_end_offset_seconds = 20; // Cut 20 seconds off for boundary detection
                                 let bytes_to_trim = (track_end_offset_seconds as usize) * bytes_per_second;
                                 
-                                // Trim the end of the recording
-                                let trimmed_size = if temp_buffer.len() > bytes_to_trim {
+                                // Determine the core track data (without the detection offset)
+                                let core_track_size = if temp_buffer.len() > bytes_to_trim {
                                     temp_buffer.len() - bytes_to_trim
                                 } else {
-                                    temp_buffer.len() / 2 // If calculation is off, just trim half the offset
+                                    temp_buffer.len() / 2 // Fallback if calculation is off
                                 };
                                 
-                                // Prepare the full track data (carryover + current trimmed data)
-                                let mut full_track_data = Vec::new();
-                                full_track_data.extend_from_slice(&carryover_buffer);
-                                full_track_data.extend_from_slice(&temp_buffer[..trimmed_size]);
+                                // Build the DJ-friendly track with overlaps
+                                let mut dj_track_data = Vec::new();
                                 
-                                // Save the carryover data from the end of this track for next track
-                                carryover_buffer.clear();
-                                carryover_buffer.extend_from_slice(&temp_buffer[trimmed_size..]);
+                                // 1. Add overlap from previous track (10 seconds)
+                                dj_track_data.extend_from_slice(&previous_track_overlap);
                                 
-                                println!("Saving completed track: {} - {} ({} KB total, {} KB carryover for next)", 
-                                    artist, title, full_track_data.len() / 1024, carryover_buffer.len() / 1024);
+                                // 2. Add the core track data
+                                dj_track_data.extend_from_slice(&temp_buffer[..core_track_size]);
+                                
+                                // 3. Add overlap for next track (10 seconds after core track)
+                                let overlap_start = core_track_size;
+                                let overlap_end = std::cmp::min(temp_buffer.len(), overlap_start + overlap_after_bytes);
+                                if overlap_start < temp_buffer.len() {
+                                    dj_track_data.extend_from_slice(&temp_buffer[overlap_start..overlap_end]);
+                                }
+                                
+                                // Save overlap from end of current track for next track's beginning
+                                previous_track_overlap.clear();
+                                let overlap_for_next_start = if core_track_size >= overlap_before_bytes {
+                                    core_track_size - overlap_before_bytes
+                                } else {
+                                    0
+                                };
+                                previous_track_overlap.extend_from_slice(&temp_buffer[overlap_for_next_start..core_track_size]);
+                                
+                                println!("Saving DJ track: {} - {} ({} KB total, {} KB overlap before, {} KB core, {} KB overlap after)", 
+                                    artist, title, 
+                                    dj_track_data.len() / 1024,
+                                    previous_track_overlap.len() / 1024,
+                                    core_track_size / 1024,
+                                    (overlap_end - overlap_start) / 1024);
                                 
                                 // Create filename from track info
                                 let safe_artist = sanitize_filename(&artist);
@@ -158,10 +185,10 @@ impl AudioStreamManager {
                                     let _ = std::fs::create_dir_all(parent);
                                 }
                                 
-                                // Save the full track data to file
-                                match std::fs::write(&filename, &full_track_data) {
+                                // Save the DJ-friendly track data to file
+                                match std::fs::write(&filename, &dj_track_data) {
                                     Ok(_) => {
-                                        println!("Successfully saved: {}", filename);
+                                        println!("Successfully saved DJ track: {}", filename);
                                         
                                         // Add ID3 tags to the saved file with artwork if available
                                         if let Err(e) = add_id3_tags(&filename, &artist, &title, artwork_url.as_deref()).await {
@@ -171,11 +198,11 @@ impl AudioStreamManager {
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("Failed to save track {}: {}", filename, e);
+                                        eprintln!("Failed to save DJ track {}: {}", filename, e);
                                     }
                                 }
                                 
-                                // Clear the current buffer for the new track (keeping carryover)
+                                // Clear the current buffer for the new track (keeping overlap)
                                 temp_buffer.clear();
                             }
                         }

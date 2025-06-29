@@ -4,25 +4,19 @@ mod colors;
 mod config;
 mod window_manager;
 mod audio;
-mod database;
+// mod database;  // Temporarily disabled until SQLite setup is complete
 
 use colors::AirCrateColors;
 use config::AppConfig;
 use window_manager::{WindowManager, restore_window_position, track_window_changes, save_window_state_on_close};
 use audio::{AudioPlugin, StartStreamEvent, StopStreamEvent, StartAudioEvent, StopAudioEvent, StartRecordingEvent, StopRecordingEvent, AudioStreamManager, TrackInfoManager, FLUX_STREAM_URL};
-use database::Database;
+// use database::Database;
 
 
 fn main() {
     let config = AppConfig::load();
     
-    // Initialize database
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let database = rt.block_on(async {
-        Database::new("sqlite:./aircrate.db").await.ok()
-    });
-    
-    let mut app = App::new();
+    App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "AirCrate".into(),

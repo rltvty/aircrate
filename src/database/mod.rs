@@ -1,6 +1,5 @@
 use sqlx::{Pool, Sqlite, SqlitePool};
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 pub mod schema;
@@ -17,7 +16,7 @@ pub enum ImageSize {
     Original,
 }
 
-#[derive(Clone)]
+#[derive(Clone, bevy::prelude::Resource)]
 pub struct Database {
     pool: Pool<Sqlite>,
 }

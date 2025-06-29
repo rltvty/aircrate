@@ -21,6 +21,6 @@ futures-util = "0.3"
 bytes = "1.0"
 bevy-tokio-tasks = "0.16"
 id3 = "1.13"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"], default-features = false }
 uuid = { version = "1.0", features = ["v4"] }
 md5 = "0.7"

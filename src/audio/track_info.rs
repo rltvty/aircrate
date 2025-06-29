@@ -67,7 +67,7 @@ impl TrackInfoManager {
 pub fn update_track_info_system(
     mut track_manager: ResMut<TrackInfoManager>,
     runtime: Res<bevy_tokio_tasks::TokioTasksRuntime>,
-    database: Option<Res<crate::database::Database>>,
+    // database: Option<Res<crate::database::Database>>,
 ) {
     if !track_manager.should_update() {
         return;
@@ -78,7 +78,7 @@ pub fn update_track_info_system(
     
     let api_url = track_manager.api_url.clone();
     let current_track = track_manager.current_track.clone();
-    let db = database.map(|d| d.clone());
+    // let db = database.map(|d| (*d).clone());
     
     runtime.spawn_background_task(move |mut ctx| async move {
         match reqwest::get(&api_url).await {
@@ -105,20 +105,13 @@ pub fn update_track_info_system(
                             println!("Track changed to: {} - {}", new_track.artist, new_track.title);
                             
                             // Store rich metadata in database if available
-                            if let Some(ref database) = db {
-                                // Check if this response has rich metadata (artists array, release info, etc.)
-                                if track_data.get("trackInfo")
-                                    .and_then(|t| t.get("artists"))
-                                    .map(|a| a.as_array().map(|arr| !arr.is_empty()).unwrap_or(false))
-                                    .unwrap_or(false) 
-                                {
-                                    println!("Rich metadata detected! Storing in database...");
-                                    if let Err(e) = database.store_track_metadata(&track_data).await {
-                                        eprintln!("Failed to store track metadata: {}", e);
-                                    } else {
-                                        println!("Successfully stored rich metadata for: {} - {}", new_track.artist, new_track.title);
-                                    }
-                                }
+                            // TODO: Re-enable database storage once SQLite setup is complete
+                            if track_data.get("trackInfo")
+                                .and_then(|t| t.get("artists"))
+                                .map(|a| a.as_array().map(|arr| !arr.is_empty()).unwrap_or(false))
+                                .unwrap_or(false) 
+                            {
+                                println!("Rich metadata detected! (Database storage temporarily disabled)");
                             }
                             
                             // Send track change event back to main thread
