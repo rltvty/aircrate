@@ -212,42 +212,160 @@ async fn fetch_available_channels() -> Result<Vec<Channel>, Box<dyn std::error::
     Ok(channels)
 }
 
+async fn get_channel_id(channel_name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔍 Looking up channel ID for: {}", channel_name);
+    
+    // Fetch the channels list
+    let response = reqwest::get("https://fluxmusic.api.radiosphere.io/channels").await?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Channels API error: {}", response.status()).into());
+    }
+    
+    let channels_data: serde_json::Value = response.json().await?;
+    
+    // The API returns an object with a "data" field containing the channels array
+    if let Some(channels_array) = channels_data["data"].as_array() {
+        println!("🔍 Found {} channels in API response", channels_array.len());
+        for (index, channel) in channels_array.iter().enumerate() {
+            if let (Some(name), Some(id)) = (
+                channel["name"].as_str(),
+                channel["channelId"].as_str(), // Note: it's "channelId", not "id"
+            ) {
+                println!("  ✓ Channel {}: '{}' (ID: {})", index, name, id);
+                if name.to_lowercase() == channel_name.to_lowercase() {
+                    println!("✅ Found matching channel '{}' with ID: {}", name, id);
+                    return Ok(id.to_string());
+                }
+            } else {
+                println!("  ❌ Channel {} missing name or channelId field", index);
+            }
+        }
+        println!("❌ No channel found matching '{}'", channel_name);
+    } else {
+        println!("❌ API response missing 'data' array field");
+    }
+    
+    Err(format!("Channel '{}' not found in API response", channel_name).into())
+}
+
 async fn track_info_task(track_tx: mpsc::Sender<TrackBoundary>, ui_tx: watch::Sender<AppState>) {
     println!("🎵 Track info task started");
     
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
-    let tracks = vec![
-        ("Daft Punk", "One More Time"),
-        ("Justice", "D.A.N.C.E."),
-        ("Moderat", "Reminder"),
-        ("Woo York", "The Red Room"),
-    ];
-    let mut track_index = 0;
+    // First, get the Clubsandwich channel ID dynamically
+    let channel_id = match get_channel_id("clubsandwich").await {
+        Ok(id) => {
+            println!("✅ Found Clubsandwich channel ID: {}", id);
+            id
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to get channel ID: {}", e);
+            println!("⚠️  Falling back to hardcoded ID");
+            "00fc5593-857e-4672-92a5-ac289a98ec01".to_string() // Fallback to known ID
+        }
+    };
+    
+    let api_url = format!("https://fluxmusic.api.radiosphere.io/channels/{}/current-track", channel_id);
+    println!("🔗 Track API URL: {}", api_url);
+    
+    let mut interval = tokio::time::interval(Duration::from_secs(5)); // Poll every 5 seconds
+    let mut last_track_id: Option<String> = None;
     
     loop {
         interval.tick().await;
         
-        let (artist, title) = tracks[track_index % tracks.len()];
-        let boundary = TrackBoundary {
-            artist: artist.to_string(),
-            title: title.to_string(),
-            artwork_url: None,
-        };
-        
-        println!("🎵 Track changed: {} - {}", artist, title);
-        
-        if track_tx.send(boundary.clone()).await.is_err() {
-            println!("⚠️  Track channel closed, stopping track poller");
-            break;
+        match fetch_current_track(&api_url).await {
+            Ok(track_info) => {
+                // Check if this is a new track
+                let track_id = format!("{}_{}", track_info.artist, track_info.title);
+                
+                if last_track_id.as_ref() != Some(&track_id) {
+                    println!("🎵 Track changed: {} - {}", track_info.artist, track_info.title);
+                    
+                    // Send track boundary for recording system
+                    if track_tx.send(track_info.clone()).await.is_err() {
+                        println!("⚠️  Track channel closed, stopping track poller");
+                        break;
+                    }
+                    
+                    // Update UI state
+                    let mut state = ui_tx.borrow().clone();
+                    state.current_track = Some(track_info);
+                    let _ = ui_tx.send(state);
+                    
+                    last_track_id = Some(track_id);
+                } else {
+                    // Same track, just update timestamp if needed
+                    println!("🔄 Same track playing: {} - {}", track_info.artist, track_info.title);
+                }
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to fetch track info: {}", e);
+                
+                // Don't spam errors, but keep trying
+                if interval.period().as_secs() < 30 {
+                    // Increase polling interval on errors to be respectful
+                    interval = tokio::time::interval(Duration::from_secs(30));
+                    println!("⏳ Increased polling interval due to API errors");
+                }
+            }
         }
-        
-        // Update UI state
-        let mut state = ui_tx.borrow().clone();
-        state.current_track = Some(boundary);
-        let _ = ui_tx.send(state);
-        
-        track_index += 1;
     }
+}
+
+async fn fetch_current_track(api_url: &str) -> Result<TrackBoundary, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🌐 Fetching track info from: {}", api_url);
+    
+    // Create HTTP client with timeout
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    
+    // Make the API request
+    let response = client.get(api_url).send().await?;
+    
+    if !response.status().is_success() {
+        return Err(format!("API error: {}", response.status()).into());
+    }
+    
+    // Parse JSON response
+    let track_data: serde_json::Value = response.json().await?;
+    
+    // Extract track information from the API response
+    let track_info = &track_data["trackInfo"];
+    
+    let artist = track_info["artistCredits"]
+        .as_str()
+        .unwrap_or("Unknown Artist")
+        .to_string();
+        
+    let title = track_info["title"]
+        .as_str()
+        .unwrap_or("Unknown Track")
+        .to_string();
+    
+    // Get artwork URL and enhance it if it's from the Flux CDN
+    let artwork_url = track_info["artwork"]
+        .as_str()
+        .map(|url| {
+            if url.contains("fluxmusic.cdn.radiosphere.io") {
+                format!("{}?type=large", url) // Get high quality artwork
+            } else {
+                url.to_string()
+            }
+        });
+    
+    println!("✅ Fetched track: {} - {} (artwork: {})", 
+        artist, 
+        title,
+        artwork_url.as_ref().map(|_| "yes").unwrap_or("no")
+    );
+    
+    Ok(TrackBoundary {
+        artist,
+        title,
+        artwork_url,
+    })
 }
 
 async fn audio_output_task(
@@ -257,8 +375,17 @@ async fn audio_output_task(
 ) {
     println!("🔊 Audio output task started");
     
-    let mut frame_count = 0;
+    // Spawn the audio playback in a separate thread (rodio requirement)
+    let (audio_sender, audio_receiver) = std::sync::mpsc::channel::<Vec<u8>>();
+    let ui_tx_audio = ui_tx.clone();
+    
+    std::thread::spawn(move || {
+        audio_playback_thread(audio_receiver, ui_tx_audio);
+    });
+    
     let mut current_track: Option<TrackBoundary> = None;
+    let mut audio_buffer = Vec::new();
+    let mut frame_count = 0;
     
     loop {
         tokio::select! {
@@ -266,11 +393,20 @@ async fn audio_output_task(
             Some(frame) = audio_rx.recv() => {
                 frame_count += 1;
                 
-                // Simulate audio processing
-                if frame_count % 200 == 0 {
-                    println!("🔊 Processed {} audio frames", frame_count);
-                    
-                    // Update UI state
+                // Accumulate audio data for decoding
+                audio_buffer.extend_from_slice(&frame.data);
+                
+                // Try to send chunks to audio thread when we have enough data
+                if audio_buffer.len() >= 8192 { // 8KB chunks
+                    let chunk = audio_buffer.drain(0..8192).collect::<Vec<u8>>();
+                    if let Err(_) = audio_sender.send(chunk) {
+                        println!("⚠️  Audio playback thread disconnected");
+                        break;
+                    }
+                }
+                
+                // Update UI periodically
+                if frame_count % 100 == 0 {
                     let mut state = ui_tx.borrow().clone();
                     state.is_playing = true;
                     let _ = ui_tx.send(state);
@@ -289,6 +425,117 @@ async fn audio_output_task(
                 println!("📻 All channels closed, stopping audio output");
                 break;
             }
+        }
+    }
+}
+
+fn audio_playback_thread(
+    audio_receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+    ui_tx: watch::Sender<AppState>,
+) {
+    use rodio::{OutputStream, Sink, Source};
+    use std::io::Cursor;
+    
+    println!("🎵 Audio playback thread started");
+    
+    // Initialize audio output
+    let (_stream, handle) = match OutputStream::try_default() {
+        Ok(output) => {
+            println!("✅ Audio output initialized");
+            output
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to initialize audio output: {}", e);
+            return;
+        }
+    };
+    
+    // Create sink for playback
+    let sink = match Sink::try_new(&handle) {
+        Ok(sink) => {
+            println!("✅ Audio sink created");
+            sink
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to create audio sink: {}", e);
+            return;
+        }
+    };
+    
+    let mut audio_buffer = Vec::new();
+    let mut chunk_count = 0;
+    let target_buffer_size = 32768; // 32KB buffer for better AAC decoding
+    
+    // Main audio processing loop
+    loop {
+        match audio_receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(chunk) => {
+                chunk_count += 1;
+                audio_buffer.extend_from_slice(&chunk);
+                
+                // Try to decode when we have enough data
+                while audio_buffer.len() >= target_buffer_size {
+                    let decode_chunk = audio_buffer.drain(0..target_buffer_size).collect::<Vec<u8>>();
+                    
+                    // Try to decode the chunk with symphonia
+                    match decode_audio_chunk(&decode_chunk) {
+                        Ok(Some(source)) => {
+                            // Keep the sink fed but not overstuffed
+                            if sink.len() < 3 {
+                                sink.append(source);
+                                println!("🔊 Audio decoded and queued! Sink queue length: {}", sink.len());
+                                
+                                // Update UI to show we're playing
+                                if chunk_count % 20 == 0 {
+                                    let mut state = ui_tx.borrow().clone();
+                                    state.is_playing = true;
+                                    let _ = ui_tx.send(state);
+                                }
+                            } else {
+                                println!("⏸️  Sink queue full ({}), skipping chunk", sink.len());
+                            }
+                        }
+                        Ok(None) => {
+                            // Not enough data for a complete frame, put some back
+                            if decode_chunk.len() > 1024 {
+                                audio_buffer.splice(0..0, decode_chunk[1024..].iter().cloned());
+                            }
+                        }
+                        Err(e) => {
+                            if chunk_count % 50 == 0 {
+                                println!("🔄 Audio decode attempt {} ({})", chunk_count, e);
+                            }
+                            // Continue trying with more data
+                        }
+                    }
+                }
+                
+                if chunk_count % 100 == 0 {
+                    println!("🎵 Audio: {} chunks processed, {} bytes buffered", chunk_count, audio_buffer.len());
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Normal timeout, continue
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                println!("📻 Audio channel disconnected, stopping playback");
+                break;
+            }
+        }
+    }
+    
+    println!("🔇 Audio playback thread ending");
+}
+
+fn decode_audio_chunk(chunk: &[u8]) -> Result<Option<rodio::Decoder<std::io::Cursor<Vec<u8>>>>, Box<dyn std::error::Error>> {
+    // Try to decode with rodio (which uses symphonia internally)
+    let cursor = std::io::Cursor::new(chunk.to_vec());
+    match rodio::Decoder::new(cursor) {
+        Ok(decoder) => Ok(Some(decoder)),
+        Err(e) => {
+            // This is expected for incomplete AAC frames
+            Err(format!("Decode error: {}", e).into())
         }
     }
 }

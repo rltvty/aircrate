@@ -2,54 +2,70 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## User Preferences & Guidelines
+
+### Code Changes
+- **ALWAYS ASK BEFORE MAKING CHANGES** - Do not take actions without specifically asking the user first
+- When there are multiple approaches, present options and let the user decide
+- Wait for explicit permission before modifying code
+
+### Project Guidelines
+- Do not create files unless absolutely necessary for achieving the goal
+- Always prefer editing existing files over creating new ones
+- Create documentation and README files to explain complex systems and help future development
+
 ## Project Overview
 
-AirCrate is a stream player and recorder built with Rust and the Bevy game engine. It features a vaporwave-inspired UI with a distinctive color palette and uses the Cobweb UI framework for reactive interfaces.
+AirCrate is a stream player and recorder built with Rust. **CURRENT ARCHITECTURE**: Tokio-first with Bevy UI (not the original Cobweb-based design).
 
-## Architecture
+## Current Architecture (Updated)
 
-- **Main Application**: Built on Bevy 0.16.1 game engine using ECS (Entity Component System) architecture
-- **UI Framework**: Uses bevy_cobweb and bevy_cobweb_ui for reactive UI components with hot reload support
-- **Styling**: Custom color palette defined in `src/colors.rs` with vaporwave aesthetic
-- **Scene Definition**: UI layouts defined in `.cob` files using Cobweb's declarative syntax
+- **Runtime**: Tokio multi-threaded async runtime manages all streaming tasks
+- **Main Thread**: Bevy runs on main thread for UI (required for macOS compatibility)
+- **Audio Pipeline**: HTTP streaming → Tokio tasks → dedicated audio thread → Rodio/Symphonia → speakers
+- **Communication**: tokio::sync channels (mpsc for data, watch for UI state)
+
+## Current Status
+
+### Working Components
+- ✅ Real HTTP streaming from Flux/Clubsandwich channel 
+- ✅ AAC audio decoding with Symphonia
+- ✅ Real-time audio playback with Rodio (user confirmed audio is working)
+- ✅ Tokio async task coordination
+- ✅ Bevy UI with real-time state updates
+- ✅ Error handling and automatic reconnection
+
+### Next Possible Steps (ask user which to do)
+- Recording with overlap buffers  
+- UI controls (start/stop/volume buttons)
+- Real track info from API (currently using mock data)
+- Channel dropdown selection
 
 ## Development Commands
 
 ### Build and Run
 ```bash
 cargo run              # Run the application
-cargo build            # Build the project
-cargo build --release  # Build optimized release version
-```
-
-### Development Tools
-```bash
 cargo check            # Quick syntax/type checking
-cargo clippy           # Linting
-cargo fmt              # Code formatting
 ```
 
-### Testing
-```bash
-cargo test             # Run all tests
+## Key Technical Details
+
+### Stream Info
+- Current URL: `https://fluxmusic.api.radiosphere.io/channels/clubsandwich/stream.aac?quality=10`
+- Channel API: `https://fluxmusic.api.radiosphere.io/channels`
+- Format: AAC 320kbps
+- Audio working: User confirmed they can hear the music
+
+### Architecture Flow
+```
+HTTP Stream → Tokio Task → Audio Buffer → Audio Thread → Rodio → Speakers
+     ↓              ↓           ↓           ↓
+Real AAC chunks  Accumulate   Decode    Playback
+                              w/Symphonia
 ```
 
-## Key Components
-
-- **Color System**: `AirCrateColors` struct provides a cohesive vaporwave color palette with methods for background, UI panels, highlights, and text colors
-- **UI Layout**: Main UI built using Bevy's flexbox-style Node system with custom styling
-- **Cobweb Integration**: Scene files (`.cob`) define reactive UI components with animation support
-
-## File Structure
-
-- `src/main.rs`: Application entry point and UI setup
-- `src/colors.rs`: Centralized color palette definitions
-- `assets/main.cob`: Cobweb scene definitions for UI components
-- `Cargo.toml`: Dependencies include Bevy and Cobweb ecosystem
-
-## UI Development Notes
-
-- The application uses a purple background with contrasting UI panels
-- Hot reload is enabled for Cobweb UI components during development
-- Custom border radius and outline styling is applied throughout the interface
-- Text colors are designed for readability against the dark vaporwave theme
+### File Structure (Current)
+- `src/main.rs`: Complete tokio-first application with all components
+- `Cargo.toml`: Dependencies for tokio, reqwest, rodio, symphonia, bevy
+- No other source files currently (all in main.rs for simplicity)
