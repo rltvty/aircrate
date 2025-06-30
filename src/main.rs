@@ -1,426 +1,395 @@
-use bevy::{color::palettes::css::*, prelude::*, window::{CompositeAlphaMode, MonitorSelection, WindowPosition}};
+use tokio::sync::{mpsc, watch};
+use std::time::Duration;
 
-mod colors;
-mod config;
-mod window_manager;
-mod audio;
-// mod database;  // Temporarily disabled until SQLite setup is complete
+#[derive(Debug, Clone)]
+pub struct AudioFrame {
+    pub data: Vec<u8>,
+    pub timestamp: std::time::Instant,
+}
 
-use colors::AirCrateColors;
-use config::AppConfig;
-use window_manager::{WindowManager, restore_window_position, track_window_changes, save_window_state_on_close};
-use audio::{AudioPlugin, StartStreamEvent, StopStreamEvent, StartAudioEvent, StopAudioEvent, StartRecordingEvent, StopRecordingEvent, AudioStreamManager, TrackInfoManager, FLUX_STREAM_URL};
-// use database::Database;
+#[derive(Debug, Clone)]
+pub struct TrackBoundary {
+    pub artist: String,
+    pub title: String,
+    pub artwork_url: Option<String>,
+}
 
+#[derive(Debug, Clone)]
+pub struct Channel {
+    pub name: String,
+    pub subtitle: String,
+    pub stream_aac_hq: String,
+    pub stream_aac_lq: String,
+    pub stream_mp3_hq: String,
+    pub stream_mp3_lq: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AppState {
+    pub is_streaming: bool,
+    pub is_playing: bool,
+    pub is_recording: bool,
+    pub current_track: Option<TrackBoundary>,
+    pub stream_status: String,
+    pub current_channel: Option<String>,
+}
 
 fn main() {
-    let config = AppConfig::load();
+    println!("🎵 AirCrate - Tokio-First Architecture");
     
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "AirCrate".into(),
-                position: if let Some(monitor_idx) = config.window.monitor_index {
-                    println!("boop");
-                    WindowPosition::Centered(MonitorSelection::Index(monitor_idx))
-                } else {
-                    WindowPosition::Centered(MonitorSelection::Primary)
-                },
-                resolution: (config.window.width, config.window.height).into(),
-                resizable: true,
-                titlebar_shown: true,
-                titlebar_transparent: true,
-                has_shadow: false,
-                transparent: true,
-                composite_alpha_mode: CompositeAlphaMode::PostMultiplied,
-                movable_by_window_background: true,
-                ..default()
-            }),
-            ..default()
-        }))
-        .add_plugins(AudioPlugin)
-        .add_plugins(bevy_tokio_tasks::TokioTasksPlugin::default())
-        .insert_resource(WindowManager::new())
-        .add_systems(Startup, setup)
-        .add_systems(Update, (
-            restore_window_position, 
-            track_window_changes, 
-            save_window_state_on_close, 
-            handle_ui_buttons,
-            update_button_appearance,
-            update_track_display
-        ))
-        .run();
+    // Create a multi-threaded tokio runtime that doesn't block the main thread
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime");
+    
+    // Create communication channels
+    let (audio_tx, audio_rx) = mpsc::channel::<AudioFrame>(100);
+    let (track_tx, track_rx) = mpsc::channel::<TrackBoundary>(10);
+    let (ui_tx, ui_rx) = watch::channel::<AppState>(AppState::default());
+    
+    // Spawn all our async tasks in the tokio runtime
+    let ui_tx_1 = ui_tx.clone();
+    rt.spawn(async move {
+        http_streaming_task(audio_tx, ui_tx_1).await;
+    });
+    
+    let ui_tx_2 = ui_tx.clone();
+    rt.spawn(async move {
+        track_info_task(track_tx, ui_tx_2).await;
+    });
+    
+    rt.spawn(async move {
+        audio_output_task(audio_rx, track_rx, ui_tx).await;
+    });
+    
+    // Launch Bevy on the main thread (required for macOS)
+    println!("🚀 Launching Bevy UI on main thread...");
+    ui::launch_bevy_app(ui_rx, rt);
 }
 
-fn setup(mut commands: Commands) {
-    commands.spawn(Camera2d);
+async fn http_streaming_task(audio_tx: mpsc::Sender<AudioFrame>, ui_tx: watch::Sender<AppState>) {
+    println!("📡 HTTP Streaming task started");
+    
+    // Get Clubsandwich channel info
+    let clubsandwich = get_clubsandwich_channel();
+    let stream_url = &clubsandwich.stream_aac_hq; // Use high-quality AAC
+    
+    // Update UI to show connecting
+    let mut state = ui_tx.borrow().clone();
+    state.stream_status = format!("Connecting to {}...", clubsandwich.name);
+    state.current_channel = Some(clubsandwich.name.clone());
+    let _ = ui_tx.send(state);
+    
+    loop {
+        match connect_and_stream(stream_url, &audio_tx, &ui_tx).await {
+            Ok(_) => {
+                println!("🔄 Stream ended normally, reconnecting...");
+            }
+            Err(e) => {
+                eprintln!("❌ Stream error: {}, retrying in 5 seconds...", e);
+                
+                // Update UI to show error
+                let mut state = ui_tx.borrow().clone();
+                state.stream_status = format!("Error: {} (retrying...)", e);
+                state.is_streaming = false;
+                let _ = ui_tx.send(state);
+                
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
 
-    // Stream connection button
-    let stream_button = commands
-        .spawn((
-            Button,
-            Node {
-                width: Val::Px(150.),
-                height: Val::Px(50.),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                margin: UiRect::all(Val::Px(5.)),
-                ..default()
-            },
-            BackgroundColor(AirCrateColors::highlight_neon_blue()),
-            BorderRadius::all(Val::Px(10.)),
-            StreamButton,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("Connect"),
-                TextFont {
-                    font_size: 14.0,
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                StreamButtonText,
-            ));
-        })
-        .id();
-
-    // Audio playback button
-    let audio_button = commands
-        .spawn((
-            Button,
-            Node {
-                width: Val::Px(150.),
-                height: Val::Px(50.),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                margin: UiRect::all(Val::Px(5.)),
-                ..default()
-            },
-            BackgroundColor(AirCrateColors::thumbs_up_blue()),
-            BorderRadius::all(Val::Px(10.)),
-            AudioButton,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("Play Audio"),
-                TextFont {
-                    font_size: 14.0,
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                AudioButtonText,
-            ));
-        })
-        .id();
-
-    // Recording button
-    let record_button = commands
-        .spawn((
-            Button,
-            Node {
-                width: Val::Px(150.),
-                height: Val::Px(50.),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                margin: UiRect::all(Val::Px(5.)),
-                ..default()
-            },
-            BackgroundColor(AirCrateColors::cassette_orange()),
-            BorderRadius::all(Val::Px(10.)),
-            RecordButton,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("Record"),
-                TextFont {
-                    font_size: 14.0,
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                RecordButtonText,
-            ));
-        })
-        .id();
-
-    // Button container
-    let button_container = commands
-        .spawn(Node {
-            flex_direction: FlexDirection::Row,
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            margin: UiRect::all(Val::Px(10.)),
-            ..default()
-        })
-        .add_children(&[stream_button, audio_button, record_button])
-        .id();
-
-    let current_track_panel = commands
-        .spawn((
-            Node {
-                width: Val::Px(400.),
-                height: Val::Px(100.),
-                flex_direction: FlexDirection::Column,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                padding: UiRect::all(Val::Px(10.)),
-                ..default()
-            },
-            BorderRadius::all(Val::Px(20.)),
-            BackgroundColor(AirCrateColors::dark_blue_ui_panel()),
-        ))
-        .with_children(|parent| {
-            // Artist name
-            parent.spawn((
-                Text::new("Unknown Artist"),
-                TextFont {
-                    font_size: 14.0,
-                    ..default()
-                },
-                TextColor(AirCrateColors::primary_text()),
-                CurrentArtistText,
-            ));
+async fn connect_and_stream(
+    url: &str, 
+    audio_tx: &mpsc::Sender<AudioFrame>, 
+    ui_tx: &watch::Sender<AppState>
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use futures_util::StreamExt;
+    
+    println!("🌐 Connecting to: {}", url);
+    
+    // Create HTTP client with streaming support
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    
+    // Make the request
+    let response = client.get(url).send().await?;
+    
+    if !response.status().is_success() {
+        return Err(format!("HTTP error: {}", response.status()).into());
+    }
+    
+    println!("✅ Connected! Status: {}", response.status());
+    
+    // Update UI to show connected
+    let mut state = ui_tx.borrow().clone();
+    state.is_streaming = true;
+    state.stream_status = "Connected - streaming audio".to_string();
+    let _ = ui_tx.send(state);
+    
+    // Get the response body as a stream
+    let mut stream = response.bytes_stream();
+    let mut chunk_count = 0;
+    let mut total_bytes = 0;
+    
+    // Process chunks as they arrive
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result?;
+        
+        if chunk.is_empty() {
+            continue;
+        }
+        
+        chunk_count += 1;
+        total_bytes += chunk.len();
+        
+        // Create audio frame from chunk
+        let frame = AudioFrame {
+            data: chunk.to_vec(),
+            timestamp: std::time::Instant::now(),
+        };
+        
+        // Send to audio processing
+        if audio_tx.send(frame).await.is_err() {
+            println!("⚠️  Audio channel closed, stopping stream");
+            break;
+        }
+        
+        // Update UI every 50 chunks (roughly every few seconds)
+        if chunk_count % 50 == 0 {
+            let mut state = ui_tx.borrow().clone();
+            state.stream_status = format!("Streaming: {} chunks, {} KB", chunk_count, total_bytes / 1024);
+            let _ = ui_tx.send(state);
             
-            // Track title
-            parent.spawn((
-                Text::new("Unknown Track"),
-                TextFont {
-                    font_size: 16.0,
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                CurrentTrackText,
-            ));
-        })
-        .id();
+            println!("📊 Streamed {} chunks, {} KB total", chunk_count, total_bytes / 1024);
+        }
+    }
     
-    let border_node = commands
-        .spawn((
-            Node {
-                width: Val::Px(500.),
-                height: Val::Px(500.),
-                border: UiRect::all(Val::Px(10.)),
-                margin: UiRect::all(Val::Px(20.)),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            BackgroundColor(MAROON.into()),
-            BorderColor(RED.into()),
-            BorderRadius::all(Val::Px(10.)),
-            Outline {
-                width: Val::Px(6.),
-                offset: Val::Px(6.),
-                color: AirCrateColors::border_lines(),
-            },
-        ))
-        .add_child(current_track_panel)
-        .id();
-
-    let container = commands
-        .spawn(Node {
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .add_children(&[button_container, border_node])
-        .id();
-
-    commands
-        .spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                align_self: AlignSelf::Stretch,
-                justify_self: JustifySelf::Stretch,
-                flex_wrap: FlexWrap::Wrap,
-                justify_content: JustifyContent::FlexStart,
-                align_items: AlignItems::FlexStart,
-                align_content: AlignContent::FlexStart,
-                ..default()
-            },
-            BackgroundColor(AirCrateColors::background_purple()),
-        ))
-        .add_child(container);
+    Ok(())
 }
 
-#[derive(Component)]
-struct StreamButton;
+fn get_clubsandwich_channel() -> Channel {
+    Channel {
+        name: "Clubsandwich".to_string(),
+        subtitle: "24/7 Electronic Music Selected by FluxFM".to_string(),
+        stream_aac_hq: "https://fluxmusic.api.radiosphere.io/channels/clubsandwich/stream.aac?quality=10".to_string(),
+        stream_aac_lq: "https://fluxmusic.api.radiosphere.io/channels/clubsandwich/stream.aac?quality=1".to_string(),
+        stream_mp3_hq: "https://fluxmusic.api.radiosphere.io/channels/clubsandwich/stream.mp3?quality=10".to_string(),
+        stream_mp3_lq: "https://fluxmusic.api.radiosphere.io/channels/clubsandwich/stream.mp3?quality=1".to_string(),
+    }
+}
 
-#[derive(Component)]
-struct StreamButtonText;
+// Future: Add async function to fetch all channels from API
+#[allow(dead_code)]
+async fn fetch_available_channels() -> Result<Vec<Channel>, Box<dyn std::error::Error + Send + Sync>> {
+    let response = reqwest::get("https://fluxmusic.api.radiosphere.io/channels").await?;
+    let channels_data: serde_json::Value = response.json().await?;
+    
+    let mut channels = Vec::new();
+    
+    if let Some(channels_array) = channels_data.as_array() {
+        for channel_data in channels_array {
+            if let (Some(name), Some(subtitle)) = (
+                channel_data["name"].as_str(),
+                channel_data["subtitle"].as_str(),
+            ) {
+                let base_url = format!("https://fluxmusic.api.radiosphere.io/channels/{}/stream", name.to_lowercase());
+                channels.push(Channel {
+                    name: name.to_string(),
+                    subtitle: subtitle.to_string(),
+                    stream_aac_hq: format!("{}.aac?quality=10", base_url),
+                    stream_aac_lq: format!("{}.aac?quality=1", base_url),
+                    stream_mp3_hq: format!("{}.mp3?quality=10", base_url),
+                    stream_mp3_lq: format!("{}.mp3?quality=1", base_url),
+                });
+            }
+        }
+    }
+    
+    Ok(channels)
+}
 
-#[derive(Component)]
-struct AudioButton;
+async fn track_info_task(track_tx: mpsc::Sender<TrackBoundary>, ui_tx: watch::Sender<AppState>) {
+    println!("🎵 Track info task started");
+    
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    let tracks = vec![
+        ("Daft Punk", "One More Time"),
+        ("Justice", "D.A.N.C.E."),
+        ("Moderat", "Reminder"),
+        ("Woo York", "The Red Room"),
+    ];
+    let mut track_index = 0;
+    
+    loop {
+        interval.tick().await;
+        
+        let (artist, title) = tracks[track_index % tracks.len()];
+        let boundary = TrackBoundary {
+            artist: artist.to_string(),
+            title: title.to_string(),
+            artwork_url: None,
+        };
+        
+        println!("🎵 Track changed: {} - {}", artist, title);
+        
+        if track_tx.send(boundary.clone()).await.is_err() {
+            println!("⚠️  Track channel closed, stopping track poller");
+            break;
+        }
+        
+        // Update UI state
+        let mut state = ui_tx.borrow().clone();
+        state.current_track = Some(boundary);
+        let _ = ui_tx.send(state);
+        
+        track_index += 1;
+    }
+}
 
-#[derive(Component)]
-struct AudioButtonText;
-
-#[derive(Component)]
-struct RecordButton;
-
-#[derive(Component)]
-struct RecordButtonText;
-
-#[derive(Component)]
-struct CurrentArtistText;
-
-#[derive(Component)]
-struct CurrentTrackText;
-
-fn handle_ui_buttons(
-    mut stream_query: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<StreamButton>)>,
-    mut audio_query: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<AudioButton>, Without<StreamButton>, Without<RecordButton>)>,
-    mut record_query: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<RecordButton>, Without<StreamButton>, Without<AudioButton>)>,
-    mut start_stream_events: EventWriter<StartStreamEvent>,
-    mut stop_stream_events: EventWriter<StopStreamEvent>,
-    mut start_audio_events: EventWriter<StartAudioEvent>,
-    mut stop_audio_events: EventWriter<StopAudioEvent>,
-    mut start_recording_events: EventWriter<StartRecordingEvent>,
-    mut stop_recording_events: EventWriter<StopRecordingEvent>,
-    audio_manager: Res<AudioStreamManager>,
+async fn audio_output_task(
+    mut audio_rx: mpsc::Receiver<AudioFrame>,
+    mut track_rx: mpsc::Receiver<TrackBoundary>,
+    ui_tx: watch::Sender<AppState>,
 ) {
-    // Handle Stream button
-    for (interaction, mut background_color) in stream_query.iter_mut() {
-        match *interaction {
-            Interaction::Pressed => {
-                if audio_manager.is_streaming {
-                    println!("Disconnect button pressed!");
-                    stop_stream_events.write(StopStreamEvent);
-                } else {
-                    println!("Connect button pressed!");
-                    start_stream_events.write(StartStreamEvent {
-                        url: FLUX_STREAM_URL.to_string(),
-                    });
+    println!("🔊 Audio output task started");
+    
+    let mut frame_count = 0;
+    let mut current_track: Option<TrackBoundary> = None;
+    
+    loop {
+        tokio::select! {
+            // Process audio frames
+            Some(frame) = audio_rx.recv() => {
+                frame_count += 1;
+                
+                // Simulate audio processing
+                if frame_count % 200 == 0 {
+                    println!("🔊 Processed {} audio frames", frame_count);
+                    
+                    // Update UI state
+                    let mut state = ui_tx.borrow().clone();
+                    state.is_playing = true;
+                    let _ = ui_tx.send(state);
                 }
             }
-            Interaction::Hovered => {
-                *background_color = if audio_manager.is_streaming {
-                    BackgroundColor(AirCrateColors::thumbs_down_red())
-                } else {
-                    BackgroundColor(AirCrateColors::thumbs_up_blue())
-                };
-            }
-            Interaction::None => {
-                *background_color = if audio_manager.is_streaming {
-                    BackgroundColor(AirCrateColors::double_up_pink())
-                } else {
-                    BackgroundColor(AirCrateColors::highlight_neon_blue())
-                };
-            }
-        }
-    }
-
-    // Handle Audio button
-    for (interaction, mut background_color) in audio_query.iter_mut() {
-        match *interaction {
-            Interaction::Pressed => {
-                if audio_manager.is_playing_audio {
-                    println!("Stop audio button pressed!");
-                    stop_audio_events.write(StopAudioEvent);
-                } else {
-                    println!("Start audio button pressed!");
-                    start_audio_events.write(StartAudioEvent);
+            
+            // Handle track boundaries (for recording)
+            Some(boundary) = track_rx.recv() => {
+                if let Some(prev_track) = current_track.take() {
+                    println!("💾 Would save track: {} - {}", prev_track.artist, prev_track.title);
                 }
+                current_track = Some(boundary);
             }
-            Interaction::Hovered => {
-                *background_color = if audio_manager.is_playing_audio {
-                    BackgroundColor(AirCrateColors::thumbs_down_red())
-                } else {
-                    BackgroundColor(AirCrateColors::thumbs_up_blue())
-                };
-            }
-            Interaction::None => {
-                *background_color = if audio_manager.is_playing_audio {
-                    BackgroundColor(AirCrateColors::double_up_pink())
-                } else {
-                    BackgroundColor(AirCrateColors::thumbs_up_blue())
-                };
-            }
-        }
-    }
-
-    // Handle Record button
-    for (interaction, mut background_color) in record_query.iter_mut() {
-        match *interaction {
-            Interaction::Pressed => {
-                if audio_manager.is_recording {
-                    println!("Stop recording button pressed!");
-                    stop_recording_events.write(StopRecordingEvent);
-                } else {
-                    println!("Start recording button pressed!");
-                    start_recording_events.write(StartRecordingEvent);
-                }
-            }
-            Interaction::Hovered => {
-                *background_color = if audio_manager.is_recording {
-                    BackgroundColor(AirCrateColors::thumbs_down_red())
-                } else {
-                    BackgroundColor(AirCrateColors::thumbs_up_blue())
-                };
-            }
-            Interaction::None => {
-                *background_color = if audio_manager.is_recording {
-                    BackgroundColor(AirCrateColors::double_up_pink())
-                } else {
-                    BackgroundColor(AirCrateColors::cassette_orange())
-                };
+            
+            else => {
+                println!("📻 All channels closed, stopping audio output");
+                break;
             }
         }
     }
 }
 
-fn update_track_display(
-    track_manager: Res<TrackInfoManager>,
-    mut artist_query: Query<&mut Text, (With<CurrentArtistText>, Without<CurrentTrackText>)>,
-    mut track_query: Query<&mut Text, (With<CurrentTrackText>, Without<CurrentArtistText>)>,
-) {
-    if track_manager.is_changed() {
-        if let Some(ref track) = track_manager.current_track {
-            // Update artist text
-            for mut text in artist_query.iter_mut() {
-                **text = track.artist.clone();
+mod ui {
+    use super::*;
+    use bevy::prelude::*;
+    use tokio::sync::watch;
+    
+    pub fn launch_bevy_app(ui_rx: watch::Receiver<AppState>, _rt: tokio::runtime::Runtime) {
+        // Run Bevy directly on the main thread (required for macOS)
+        App::new()
+            .add_plugins(DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "AirCrate - Tokio Edition".into(),
+                    resolution: (800.0, 600.0).into(),
+                    ..default()
+                }),
+                ..default()
+            }))
+            .insert_resource(StateReceiver(ui_rx))
+            .add_systems(Startup, setup_ui)
+            .add_systems(Update, update_ui_from_state)
+            .run();
+    }
+    
+    #[derive(Resource)]
+    struct StateReceiver(watch::Receiver<AppState>);
+    
+    #[derive(Component)]
+    struct StatusText;
+    
+    #[derive(Component)]
+    struct TrackText;
+    
+    fn setup_ui(mut commands: Commands) {
+        commands.spawn(Camera2d);
+        
+        // Status text
+        commands.spawn((
+            Text::new("Initializing..."),
+            TextFont {
+                font_size: 24.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(50.0),
+                left: Val::Px(50.0),
+                ..default()
+            },
+            StatusText,
+        ));
+        
+        // Track text
+        commands.spawn((
+            Text::new("No track playing"),
+            TextFont {
+                font_size: 18.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.8, 0.8, 0.8)),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(100.0),
+                left: Val::Px(50.0),
+                ..default()
+            },
+            TrackText,
+        ));
+    }
+    
+    fn update_ui_from_state(
+        mut state_receiver: ResMut<StateReceiver>,
+        mut status_query: Query<&mut Text, (With<StatusText>, Without<TrackText>)>,
+        mut track_query: Query<&mut Text, (With<TrackText>, Without<StatusText>)>,
+    ) {
+        // Check for state updates (non-blocking)
+        if state_receiver.0.has_changed().unwrap_or(false) {
+            let state = state_receiver.0.borrow_and_update().clone();
+            
+            // Update status text
+            for mut text in status_query.iter_mut() {
+                **text = format!(
+                    "Streaming: {} | Playing: {} | Recording: {} | {}",
+                    state.is_streaming,
+                    state.is_playing,
+                    state.is_recording,
+                    state.stream_status
+                );
             }
             
             // Update track text
             for mut text in track_query.iter_mut() {
-                **text = track.title.clone();
+                **text = if let Some(ref track) = state.current_track {
+                    format!("🎵 {} - {}", track.artist, track.title)
+                } else {
+                    "No track playing".to_string()
+                };
             }
-        }
-    }
-}
-
-fn update_button_appearance(
-    audio_manager: Res<AudioStreamManager>,
-    mut stream_text_query: Query<&mut Text, (With<StreamButtonText>, Without<AudioButtonText>, Without<RecordButtonText>)>,
-    mut audio_text_query: Query<&mut Text, (With<AudioButtonText>, Without<StreamButtonText>, Without<RecordButtonText>)>,
-    mut record_text_query: Query<&mut Text, (With<RecordButtonText>, Without<StreamButtonText>, Without<AudioButtonText>)>,
-) {
-    if audio_manager.is_changed() {
-        // Update stream button text
-        for mut text in stream_text_query.iter_mut() {
-            **text = if audio_manager.is_streaming {
-                "Disconnect".to_string()
-            } else {
-                "Connect".to_string()
-            };
-        }
-        
-        // Update audio button text
-        for mut text in audio_text_query.iter_mut() {
-            **text = if audio_manager.is_playing_audio {
-                "Stop Audio".to_string()
-            } else {
-                "Play Audio".to_string()
-            };
-        }
-        
-        // Update record button text
-        for mut text in record_text_query.iter_mut() {
-            **text = if audio_manager.is_recording {
-                "Stop Record".to_string()
-            } else {
-                "Record".to_string()
-            };
         }
     }
 }
