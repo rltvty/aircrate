@@ -70,13 +70,36 @@ impl AudioStreamManager {
             overlap_after_seconds: 10,    // Include 10 seconds of next track
         }
     }
+
+    pub fn stop_stream(&mut self) {
+        if !self.is_streaming {
+            return; // Already stopped
+        }
+        println!("Stopping stream");
+        
+        // Cancel the current stream task if running
+        if let Some(token) = &self.cancel_token {
+            token.cancel();
+        }
+        
+        // Stop audio playback
+        self.stop_audio_playback();
+        
+        // Stop recording
+        self.stop_recording();
+        
+        self.is_streaming = false;
+        self.current_url = None;
+        self.cancel_token = None;
+        self.current_recording_track = None;
+        self.save_track_sender = None;
+        self.audio_sender = None;
+    }
     
     pub fn start_stream(&mut self, url: &str, runtime: &bevy_tokio_tasks::TokioTasksRuntime) {
         if self.is_streaming {
             return; // Already streaming
         }
-        
-        self.stop_stream();
         
         // Create new cancellation token for this stream
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -102,6 +125,9 @@ impl AudioStreamManager {
         
         // Spawn a task to handle HTTP streaming
         let url_clone = url.to_string();
+        let overlap_before_seconds = self.overlap_before_seconds;
+        let overlap_after_seconds = self.overlap_after_seconds;
+        let track_end_offset_seconds = self.track_end_offset_seconds;
         
         runtime.spawn_background_task(move |_ctx| async move {
             match crate::audio::http_stream::HttpStreamReader::new(&url_clone).await {
@@ -117,10 +143,11 @@ impl AudioStreamManager {
                     let mut previous_track_overlap = Vec::new(); // Overlap from end of previous track
                     
                     // Calculate buffer sizes for overlap management
-                    let estimated_bitrate = 128000; // 128 kbps AAC stream
+                    let estimated_bitrate = 320000; // 320 kbps AAC stream
                     let bytes_per_second = estimated_bitrate / 8;
-                    let overlap_before_bytes = (10 * bytes_per_second) as usize; // 10 seconds before
-                    let overlap_after_bytes = (10 * bytes_per_second) as usize;  // 10 seconds after
+                    let overlap_before_bytes = (overlap_before_seconds * bytes_per_second) as usize;
+                    let overlap_after_bytes = (overlap_after_seconds * bytes_per_second) as usize;
+                    let track_end_offset_bytes = (track_end_offset_seconds * bytes_per_second) as usize;
                     let _stream_start_time = std::time::Instant::now();
                     
                     // Read chunks and optionally record
@@ -131,13 +158,10 @@ impl AudioStreamManager {
                         // Check for save commands (non-blocking) - only if recording is enabled
                         if let Ok((artist, title, artwork_url)) = save_rx.try_recv() {
                             if !temp_buffer.is_empty() {
-                                // Calculate track boundaries with DJ-friendly overlaps
-                                let track_end_offset_seconds = 20; // Cut 20 seconds off for boundary detection
-                                let bytes_to_trim = (track_end_offset_seconds as usize) * bytes_per_second;
                                 
                                 // Determine the core track data (without the detection offset)
-                                let core_track_size = if temp_buffer.len() > bytes_to_trim {
-                                    temp_buffer.len() - bytes_to_trim
+                                let core_track_size = if temp_buffer.len() > track_end_offset_bytes {
+                                    temp_buffer.len() - track_end_offset_bytes
                                 } else {
                                     temp_buffer.len() / 2 // Fallback if calculation is off
                                 };
@@ -256,6 +280,18 @@ impl AudioStreamManager {
         self.is_streaming = true;
         self.current_url = Some(url.to_string());
     }
+
+        pub fn stop_audio_playback(&mut self) {
+        if !self.is_playing_audio {
+            return
+        }
+
+        if let Some(token) = &self.audio_cancel_token {
+            token.cancel();
+        }
+        self.is_playing_audio = false;
+        self.audio_cancel_token = None;
+    }
     
     pub fn start_audio_playback(&mut self, audio_rx: mpsc::Receiver<Bytes>, cancel_token: tokio_util::sync::CancellationToken) {
         if self.is_playing_audio {
@@ -302,10 +338,7 @@ impl AudioStreamManager {
                                     let cursor = Cursor::new(decode_data);
                                     match rodio::Decoder::new(cursor) {
                                         Ok(source) => {
-                                            // Keep the sink queue well-fed but not overstuffed
-                                            if sink.len() < 3 {
-                                                sink.append(source);
-                                            }
+                                            sink.append(source);
                                         }
                                         Err(_) => {
                                             // If decode fails, this might be a partial frame
@@ -338,13 +371,7 @@ impl AudioStreamManager {
         });
     }
     
-    pub fn stop_audio_playback(&mut self) {
-        if let Some(token) = &self.audio_cancel_token {
-            token.cancel();
-        }
-        self.is_playing_audio = false;
-        self.audio_cancel_token = None;
-    }
+
     
     pub fn start_recording(&mut self) {
         self.is_recording = true;
@@ -361,27 +388,7 @@ impl AudioStreamManager {
         println!("Recording stopped");
     }
     
-    pub fn stop_stream(&mut self) {
-        println!("Stopping stream");
-        
-        // Cancel the current stream task if running
-        if let Some(token) = &self.cancel_token {
-            token.cancel();
-        }
-        
-        // Stop audio playback
-        self.stop_audio_playback();
-        
-        // Stop recording
-        self.stop_recording();
-        
-        self.is_streaming = false;
-        self.current_url = None;
-        self.cancel_token = None;
-        self.current_recording_track = None;
-        self.save_track_sender = None;
-        self.audio_sender = None;
-    }
+
 }
 
 fn setup_audio_system() {
