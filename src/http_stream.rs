@@ -83,6 +83,7 @@ async fn connect_and_stream(
     let mut stream = response.bytes_stream();
     let mut chunk_count = 0;
     let mut total_bytes = 0;
+    let start_time = std::time::Instant::now();
 
     // Process chunks as they arrive
     while let Some(chunk_result) = stream.next().await {
@@ -106,6 +107,13 @@ async fn connect_and_stream(
 
         // Update UI every 50 chunks (roughly every few seconds)
         if chunk_count % 50 == 0 {
+            let elapsed = start_time.elapsed();
+            let bytes_per_second = if elapsed.as_secs() > 0 {
+                total_bytes as f64 / elapsed.as_secs_f64()
+            } else {
+                0.0
+            };
+
             let mut state = ui_tx.borrow().clone();
             state.stream_status = format!(
                 "Streaming: {} chunks, {} KB",
@@ -115,9 +123,10 @@ async fn connect_and_stream(
             let _ = ui_tx.send(state);
 
             println!(
-                "📊 Streamed {} chunks, {} KB total",
+                "📊 Streamed {} chunks, {} KB total, {:.1} KB/s",
                 chunk_count,
-                total_bytes / 1024
+                total_bytes / 1024,
+                bytes_per_second / 1024.0
             );
         }
     }
