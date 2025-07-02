@@ -11,6 +11,7 @@ pub struct AudioFrame {
 }
 
 // Streaming reader that implements Read + Seek for use with Rodio's decoder
+#[derive(Clone)]
 struct StreamingReader {
     receiver: Arc<Mutex<std::sync::mpsc::Receiver<Vec<u8>>>>,
     buffer: VecDeque<u8>,
@@ -175,7 +176,7 @@ async fn http_streaming_task(audio_tx: mpsc::Sender<AudioFrame>, ui_tx: watch::S
                 println!("🔄 Stream ended normally, reconnecting...");
             }
             Err(e) => {
-                eprintln!("❌ Stream error: {}, retrying in 5 seconds...", e);
+                eprintln!("❌ Stream error: {}, retrying in 1 seconds...", e);
                 
                 // Update UI to show error
                 let mut state = ui_tx.borrow().clone();
@@ -183,7 +184,7 @@ async fn http_streaming_task(audio_tx: mpsc::Sender<AudioFrame>, ui_tx: watch::S
                 state.is_streaming = false;
                 let _ = ui_tx.send(state);
                 
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     }
@@ -200,7 +201,7 @@ async fn connect_and_stream(
     
     // Create HTTP client with streaming support
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(5))
         .build()?;
     
     // Make the request
@@ -229,7 +230,7 @@ async fn connect_and_stream(
         
         if chunk.is_empty() {
             continue;
-        }
+        } 
         
         chunk_count += 1;
         total_bytes += chunk.len();
@@ -368,7 +369,7 @@ async fn track_info_task(track_tx: mpsc::Sender<TrackBoundary>, ui_tx: watch::Se
                 let track_id = format!("{}_{}", track_info.artist, track_info.title);
                 
                 if last_track_id.as_ref() != Some(&track_id) {
-                    println!("🎵 Track changed: {} - {}", track_info.artist, track_info.title);
+                    println!("🎵 Track changed: {} - {} (artwork: {})", track_info.artist, track_info.title, track_info.artwork_url.as_ref().map(|_| "yes").unwrap_or("no"));
                     
                     // Send track boundary for recording system
                     if track_tx.send(track_info.clone()).await.is_err() {
@@ -382,10 +383,7 @@ async fn track_info_task(track_tx: mpsc::Sender<TrackBoundary>, ui_tx: watch::Se
                     let _ = ui_tx.send(state);
                     
                     last_track_id = Some(track_id);
-                } else {
-                    // Same track, just update timestamp if needed
-                    println!("🔄 Same track playing: {} - {}", track_info.artist, track_info.title);
-                }
+                } 
             }
             Err(e) => {
                 eprintln!("❌ Failed to fetch track info: {}", e);
@@ -440,12 +438,6 @@ async fn fetch_current_track(api_url: &str) -> Result<TrackBoundary, Box<dyn std
                 url.to_string()
             }
         });
-    
-    println!("✅ Fetched track: {} - {} (artwork: {})", 
-        artist, 
-        title,
-        artwork_url.as_ref().map(|_| "yes").unwrap_or("no")
-    );
     
     Ok(TrackBoundary {
         artist,
@@ -532,37 +524,38 @@ fn audio_playback_thread(
             return;
         }
     };
-    
+
     // Create sink for playback
     let sink = rodio::Sink::connect_new(stream_handle.mixer());
-    
+        
     // Create streaming reader that implements Read + Seek
     let streaming_reader = StreamingReader::new(audio_receiver);
-    
-    // Create decoder using Rodio's built-in Symphonia integration
-    match rodio::Decoder::new(streaming_reader) {
-        Ok(source) => {
-            println!("✅ Rodio decoder created successfully");
-            
-            // Append the decoded source to the sink
-            sink.append(source);
-            
-            // Update UI to show we're playing
-            let mut state = ui_tx.borrow().clone();
-            state.is_playing = true;
-            let _ = ui_tx.send(state);
-            
-            // Sleep until playback ends (keeps the sink alive)
-            println!("🎵 Starting audio playback - sleeping until end");
-            sink.sleep_until_end();
-        }
-        Err(e) => {
-            eprintln!("❌ Failed to create Rodio decoder: {}", e);
-            return;
+
+    loop {
+        // Create decoder using Rodio's built-in Symphonia integration
+        match rodio::Decoder::builder().with_data(streaming_reader.clone()).with_hint("aac").with_gapless(false).with_seekable(false).build() {
+            Ok(source) => {
+                println!("✅ Rodio decoder created successfully");
+                
+                // Append the decoded source to the sink
+                sink.append(source);
+                
+                // Update UI to show we're playing
+                let mut state = ui_tx.borrow().clone();
+                state.is_playing = true;
+                let _ = ui_tx.send(state);
+                
+                // Sleep until playback ends (keeps the sink alive)
+                println!("🎵 Starting audio playback - sleeping until end");
+                sink.sleep_until_end();
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to create Rodio decoder: {}, retrying in 5 seconds...", e);
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
         }
     }
     
-    println!("🔇 Audio playback thread ending");
 }
 
 mod ui {
