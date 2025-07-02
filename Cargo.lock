@@ -113,11 +113,10 @@ dependencies = [
  "id3",
  "md5",
  "reqwest",
- "rodio",
+ "rodio 0.20.1 (git+https://github.com/RustAudio/rodio.git?rev=f91f1c32b9cbdefbc2723c7bcd12c5e5bd478aa3)",
  "serde",
  "serde_json",
  "sqlx",
- "symphonia",
  "tokio",
  "tokio-util",
  "toml",
@@ -540,7 +539,7 @@ dependencies = [
  "bevy_reflect",
  "bevy_transform",
  "cpal",
- "rodio",
+ "rodio 0.20.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "tracing",
 ]
 
@@ -1737,12 +1736,6 @@ dependencies = [
  "libc",
  "libloading",
 ]
-
-[[package]]
-name = "claxon"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bfbf56724aa9eca8afa4fcfadeb479e722935bb2a0900c2d37e0cc477af0688"
 
 [[package]]
 name = "cob_sickle_macros"
@@ -4082,6 +4075,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint-dig"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4125,6 +4128,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1429034a0490724d0075ebb2bc9e875d6503c3cf69e235a8941aa757d83ef5bf"
 dependencies = [
  "autocfg",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-bigint",
  "num-integer",
  "num-traits",
 ]
@@ -5026,10 +5040,19 @@ version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7ceb6607dd738c99bc8cb28eff249b7cd5c8ec88b9db96c0608c1480d140fb1"
 dependencies = [
- "claxon",
  "cpal",
  "hound",
  "lewton",
+]
+
+[[package]]
+name = "rodio"
+version = "0.20.1"
+source = "git+https://github.com/RustAudio/rodio.git?rev=f91f1c32b9cbdefbc2723c7bcd12c5e5bd478aa3#f91f1c32b9cbdefbc2723c7bcd12c5e5bd478aa3"
+dependencies = [
+ "cpal",
+ "dasp_sample",
+ "num-rational",
  "symphonia",
 ]
 
@@ -5747,11 +5770,10 @@ dependencies = [
  "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
  "symphonia-codec-aac",
- "symphonia-codec-adpcm",
  "symphonia-codec-pcm",
  "symphonia-codec-vorbis",
  "symphonia-core",
- "symphonia-format-mkv",
+ "symphonia-format-isomp4",
  "symphonia-format-ogg",
  "symphonia-format-riff",
  "symphonia-metadata",
@@ -5793,16 +5815,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "symphonia-codec-adpcm"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c94e1feac3327cd616e973d5be69ad36b3945f16b06f19c6773fc3ac0b426a0f"
-dependencies = [
- "log",
- "symphonia-core",
-]
-
-[[package]]
 name = "symphonia-codec-pcm"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5837,12 +5849,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "symphonia-format-mkv"
+name = "symphonia-format-isomp4"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bb43471a100f7882dc9937395bd5ebee8329298e766250b15b3875652fe3d6f"
+checksum = "abfdf178d697e50ce1e5d9b982ba1b94c47218e03ec35022d9f0e071a16dc844"
 dependencies = [
- "lazy_static",
+ "encoding_rs",
  "log",
  "symphonia-core",
  "symphonia-metadata",

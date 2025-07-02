@@ -13,8 +13,7 @@ dirs = "5.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
 reqwest = { version = "0.12", features = ["json", "stream"] }
-symphonia = { version = "0.5", features = ["aac", "mp3"] }
-rodio = { version = "0.20.1", features = ["symphonia"] }
+rodio = { git = "https://github.com/RustAudio/rodio.git", rev = "f91f1c32b9cbdefbc2723c7bcd12c5e5bd478aa3", features = ["flac", "mp3", "wav", "symphonia-aac"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1.0"
 futures-util = "0.3"

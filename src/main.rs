@@ -1,6 +1,9 @@
 use tokio::sync::{mpsc, watch};
 use std::time::Duration;
 
+use std::io::{Read, Seek};
+use std::marker::Sync;
+
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
     pub data: Vec<u8>,
@@ -433,13 +436,10 @@ fn audio_playback_thread(
     audio_receiver: std::sync::mpsc::Receiver<Vec<u8>>,
     ui_tx: watch::Sender<AppState>,
 ) {
-    use rodio::{OutputStream, Sink, Source};
-    use std::io::Cursor;
-    
     println!("🎵 Audio playback thread started");
     
     // Initialize audio output
-    let (_stream, handle) = match OutputStream::try_default() {
+    let stream_handle = match rodio::OutputStreamBuilder::open_default_stream() {
         Ok(output) => {
             println!("✅ Audio output initialized");
             output
@@ -451,93 +451,22 @@ fn audio_playback_thread(
     };
     
     // Create sink for playback
-    let sink = match Sink::try_new(&handle) {
-        Ok(sink) => {
-            println!("✅ Audio sink created");
-            sink
-        }
-        Err(e) => {
-            eprintln!("❌ Failed to create audio sink: {}", e);
-            return;
-        }
-    };
-    
-    let mut audio_buffer = Vec::new();
-    let mut chunk_count = 0;
-    let target_buffer_size = 32768; // 32KB buffer for better AAC decoding
-    
-    // Main audio processing loop
-    loop {
-        match audio_receiver.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(chunk) => {
-                chunk_count += 1;
-                audio_buffer.extend_from_slice(&chunk);
-                
-                // Try to decode when we have enough data
-                while audio_buffer.len() >= target_buffer_size {
-                    let decode_chunk = audio_buffer.drain(0..target_buffer_size).collect::<Vec<u8>>();
-                    
-                    // Try to decode the chunk with symphonia
-                    match decode_audio_chunk(&decode_chunk) {
-                        Ok(Some(source)) => {
-                            // Keep the sink fed but not overstuffed
-                            if sink.len() < 3 {
-                                sink.append(source);
-                                println!("🔊 Audio decoded and queued! Sink queue length: {}", sink.len());
-                                
-                                // Update UI to show we're playing
-                                if chunk_count % 20 == 0 {
-                                    let mut state = ui_tx.borrow().clone();
-                                    state.is_playing = true;
-                                    let _ = ui_tx.send(state);
-                                }
-                            } else {
-                                println!("⏸️  Sink queue full ({}), skipping chunk", sink.len());
-                            }
-                        }
-                        Ok(None) => {
-                            // Not enough data for a complete frame, put some back
-                            if decode_chunk.len() > 1024 {
-                                audio_buffer.splice(0..0, decode_chunk[1024..].iter().cloned());
-                            }
-                        }
-                        Err(e) => {
-                            if chunk_count % 50 == 0 {
-                                println!("🔄 Audio decode attempt {} ({})", chunk_count, e);
-                            }
-                            // Continue trying with more data
-                        }
-                    }
-                }
-                
-                if chunk_count % 100 == 0 {
-                    println!("🎵 Audio: {} chunks processed, {} bytes buffered", chunk_count, audio_buffer.len());
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Normal timeout, continue
-                continue;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                println!("📻 Audio channel disconnected, stopping playback");
-                break;
-            }
-        }
-    }
-    
-    println!("🔇 Audio playback thread ending");
-}
+    let sink = rodio::Sink::connect_new(stream_handle.mixer());
 
-fn decode_audio_chunk(chunk: &[u8]) -> Result<Option<rodio::Decoder<std::io::Cursor<Vec<u8>>>>, Box<dyn std::error::Error>> {
-    // Try to decode with rodio (which uses symphonia internally)
-    let cursor = std::io::Cursor::new(chunk.to_vec());
-    match rodio::Decoder::new(cursor) {
-        Ok(decoder) => Ok(Some(decoder)),
-        Err(e) => {
-            // This is expected for incomplete AAC frames
-            Err(format!("Decode error: {}", e).into())
-        }
-    }
+    let source = rodio::Decoder::builder()
+    .with_hint("aac")
+    .with_gapless(false)
+    .with_seekable(false)
+    .with_data(audio_receiver);
+
+    sink.append(source);
+    sink.sleep_until_end();
+
+    Ok(());
+    println!("🔇 Audio playback thread ending");
+
+    
+    
 }
 
 mod ui {
