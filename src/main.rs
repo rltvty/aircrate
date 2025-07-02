@@ -1,8 +1,9 @@
 use tokio::sync::{mpsc, watch};
 use std::time::Duration;
-use std::io::{Read, Seek, SeekFrom, Result as IoResult};
-use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
+
+use crate::streaming_reader::StreamingReader;
+
+mod streaming_reader;
 
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
@@ -10,91 +11,6 @@ pub struct AudioFrame {
     pub timestamp: std::time::Instant,
 }
 
-// Streaming reader that implements Read + Seek for use with Rodio's decoder
-#[derive(Clone)]
-struct StreamingReader {
-    receiver: Arc<Mutex<std::sync::mpsc::Receiver<Vec<u8>>>>,
-    buffer: VecDeque<u8>,
-    position: u64,
-    finished: bool,
-}
-
-impl StreamingReader {
-    fn new(receiver: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
-        Self {
-            receiver: Arc::new(Mutex::new(receiver)),
-            buffer: VecDeque::new(),
-            position: 0,
-            finished: false,
-        }
-    }
-    
-    fn fill_buffer(&mut self) -> IoResult<()> {
-        if self.finished {
-            return Ok(());
-        }
-        
-        // Try to receive more data without blocking too long
-        let result = {
-            let receiver = self.receiver.lock().unwrap();
-            receiver.recv_timeout(std::time::Duration::from_millis(100))
-        };
-        
-        match result {
-            Ok(chunk) => {
-                self.buffer.extend(chunk);
-                Ok(())
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // No data available right now, that's okay for streaming
-                Ok(())
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                // Stream has ended
-                self.finished = true;
-                Ok(())
-            }
-        }
-    }
-}
-
-impl Read for StreamingReader {
-    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        // Try to fill buffer if we don't have enough data
-        if self.buffer.len() < buf.len() && !self.finished {
-            self.fill_buffer()?;
-        }
-        
-        let bytes_to_read = std::cmp::min(buf.len(), self.buffer.len());
-        
-        if bytes_to_read == 0 {
-            return Ok(0); // EOF or no data available
-        }
-        
-        // Copy data from our buffer to the output buffer
-        for i in 0..bytes_to_read {
-            buf[i] = self.buffer.pop_front().unwrap();
-        }
-        
-        self.position += bytes_to_read as u64;
-        Ok(bytes_to_read)
-    }
-}
-
-impl Seek for StreamingReader {
-    fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
-        match pos {
-            SeekFrom::Current(0) => Ok(self.position),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Seeking not supported in streaming mode"
-            ))
-        }
-    }
-}
-
-unsafe impl Send for StreamingReader {}
-unsafe impl Sync for StreamingReader {}
 
 #[derive(Debug, Clone)]
 pub struct TrackBoundary {
@@ -234,7 +150,7 @@ async fn connect_and_stream(
         
         chunk_count += 1;
         total_bytes += chunk.len();
-        
+
         // Create audio frame from chunk
         let frame = AudioFrame {
             data: chunk.to_vec(),
@@ -242,9 +158,23 @@ async fn connect_and_stream(
         };
         
         // Send to audio processing
-        if audio_tx.send(frame).await.is_err() {
-            println!("⚠️  Audio channel closed, stopping stream");
-            break;
+        match audio_tx.try_send(frame.clone()) {
+            Ok(_) => {},
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                println!("⚠️  Audio channel full, waiting...");
+                // Channel is full, wait and try again
+                match audio_tx.send(frame).await {
+                    Ok(_) => println!("✅ Audio channel unblocked"),
+                    Err(_) => {
+                        println!("⚠️  Audio channel closed, stopping stream");
+                        break;
+                    }
+                }
+            },
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                println!("⚠️  Audio channel closed, stopping stream");
+                break;
+            }
         }
         
         // Update UI every 50 chunks (roughly every few seconds)
@@ -462,7 +392,7 @@ async fn audio_output_task(
     });
     
     let mut current_track: Option<TrackBoundary> = None;
-    let mut audio_buffer = Vec::new();
+    //let mut audio_buffer = Vec::new();
     let mut frame_count = 0;
     
     loop {
@@ -471,16 +401,9 @@ async fn audio_output_task(
             Some(frame) = audio_rx.recv() => {
                 frame_count += 1;
                 
-                // Accumulate audio data for decoding
-                audio_buffer.extend_from_slice(&frame.data);
-                
-                // Try to send chunks to audio thread when we have enough data
-                if audio_buffer.len() >= 8192 { // 8KB chunks
-                    let chunk = audio_buffer.drain(0..8192).collect::<Vec<u8>>();
-                    if let Err(_) = audio_sender.send(chunk) {
-                        println!("⚠️  Audio playback thread disconnected");
-                        break;
-                    }
+                if let Err(_) = audio_sender.send(frame.data) {
+                    println!("⚠️  Audio playback thread disconnected");
+                    break;
                 }
                 
                 // Update UI periodically
@@ -551,7 +474,7 @@ fn audio_playback_thread(
             }
             Err(e) => {
                 eprintln!("❌ Failed to create Rodio decoder: {}, retrying in 5 seconds...", e);
-                std::thread::sleep(std::time::Duration::from_secs(5));
+                std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }
     }
