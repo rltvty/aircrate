@@ -130,26 +130,12 @@ pub async fn track_info_task(
 ) {
     println!("🎵 Track info task started");
 
-    let channel_id: String;
-
-    loop {
-        let state = ui_tx.borrow().clone();
-
-        match state.current_channel {
-            Some(channel) => {
-                channel_id = channel.channel_id;
-                break;
-            }
-            None => {
-                eprintln!("❌ Failed to get channel info, retrying in 2 seconds...");
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-        }
-    }
+    let state = ui_tx.borrow().clone();
+    let current_channel = state.current_channel.clone().unwrap();
 
     let api_url = format!(
         "https://fluxmusic.api.radiosphere.io/channels/{}/current-track",
-        channel_id
+        current_channel.channel_id
     );
     println!("🔗 Track API URL: {}", api_url);
 

@@ -1,9 +1,9 @@
 use tokio::sync::{mpsc, watch};
 
 use crate::{
-    audio_output::{audio_output_task},
+    audio_output::audio_output_task,
     bevy_ui::launch_bevy_app,
-    channels::{AppState, TrackBoundary, track_info_task},
+    channels::{get_channel, track_info_task, AppState, TrackBoundary},
     http_stream::http_streaming_task,
 };
 
@@ -22,10 +22,21 @@ fn main() {
         .build()
         .expect("Failed to create tokio runtime");
 
+    let channel = match rt.block_on(get_channel("clubsandwich")) {
+        Ok(result) => result,
+        Err(e) => {
+            println!("❌ Unable to get channel info: {}", e);
+            return;
+        }
+    };
+
+    let mut app_state = AppState::default();
+    app_state.current_channel = Some(channel);
+
     // Create communication channels
     let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(100);
     let (track_tx, track_rx) = mpsc::channel::<TrackBoundary>(10);
-    let (ui_tx, ui_rx) = watch::channel::<AppState>(AppState::default());
+    let (ui_tx, ui_rx) = watch::channel::<AppState>(app_state);
 
     // Spawn all our async tasks in the tokio runtime
     let ui_tx_1 = ui_tx.clone();

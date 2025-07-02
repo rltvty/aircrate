@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 use crate::{
-    channels::{AppState, get_channel},
+    channels::{AppState},
 };
 
 pub async fn http_streaming_task(
@@ -12,17 +12,11 @@ pub async fn http_streaming_task(
 ) {
     println!("📡 HTTP Streaming task started");
 
-    let channel = match get_channel("clubsandwich").await {
-        Ok(result) => result,
-        Err(e) => {
-            println!("❌ Unable to get channel info: {}", e);
-            return;
-        }
-    };
-
+    let mut state = ui_tx.borrow().clone();
+    let current_channel = state.current_channel.clone().unwrap();
+    
     let mut stream_url: Option<String> = None;
-
-    for stream in channel.streams.iter() {
+    for stream in current_channel.streams.iter() {
         if stream.bitrate == 320 && stream.encoding == "aac" {
             stream_url = Some(stream.url.clone());
             break;
@@ -33,9 +27,7 @@ pub async fn http_streaming_task(
         return;
     }
     // Update UI to show connecting
-    let mut state = ui_tx.borrow().clone();
-    state.stream_status = format!("Connecting to {}...", channel.name);
-    state.current_channel = Some(channel);
+    state.stream_status = format!("Connecting to {}...", current_channel.name);
     let _ = ui_tx.send(state);
 
     loop {
