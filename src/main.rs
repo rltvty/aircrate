@@ -10,6 +10,7 @@ use crate::{
 mod audio_output;
 mod bevy_ui;
 mod channels;
+mod colors;
 mod http_stream;
 mod streaming_reader;
 
