@@ -1,14 +1,99 @@
 use tokio::sync::{mpsc, watch};
 use std::time::Duration;
-
-use std::io::{Read, Seek};
-use std::marker::Sync;
+use std::io::{Read, Seek, SeekFrom, Result as IoResult};
+use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
     pub data: Vec<u8>,
     pub timestamp: std::time::Instant,
 }
+
+// Streaming reader that implements Read + Seek for use with Rodio's decoder
+struct StreamingReader {
+    receiver: Arc<Mutex<std::sync::mpsc::Receiver<Vec<u8>>>>,
+    buffer: VecDeque<u8>,
+    position: u64,
+    finished: bool,
+}
+
+impl StreamingReader {
+    fn new(receiver: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+        Self {
+            receiver: Arc::new(Mutex::new(receiver)),
+            buffer: VecDeque::new(),
+            position: 0,
+            finished: false,
+        }
+    }
+    
+    fn fill_buffer(&mut self) -> IoResult<()> {
+        if self.finished {
+            return Ok(());
+        }
+        
+        // Try to receive more data without blocking too long
+        let result = {
+            let receiver = self.receiver.lock().unwrap();
+            receiver.recv_timeout(std::time::Duration::from_millis(100))
+        };
+        
+        match result {
+            Ok(chunk) => {
+                self.buffer.extend(chunk);
+                Ok(())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // No data available right now, that's okay for streaming
+                Ok(())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Stream has ended
+                self.finished = true;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Read for StreamingReader {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        // Try to fill buffer if we don't have enough data
+        if self.buffer.len() < buf.len() && !self.finished {
+            self.fill_buffer()?;
+        }
+        
+        let bytes_to_read = std::cmp::min(buf.len(), self.buffer.len());
+        
+        if bytes_to_read == 0 {
+            return Ok(0); // EOF or no data available
+        }
+        
+        // Copy data from our buffer to the output buffer
+        for i in 0..bytes_to_read {
+            buf[i] = self.buffer.pop_front().unwrap();
+        }
+        
+        self.position += bytes_to_read as u64;
+        Ok(bytes_to_read)
+    }
+}
+
+impl Seek for StreamingReader {
+    fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
+        match pos {
+            SeekFrom::Current(0) => Ok(self.position),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Seeking not supported in streaming mode"
+            ))
+        }
+    }
+}
+
+unsafe impl Send for StreamingReader {}
+unsafe impl Sync for StreamingReader {}
 
 #[derive(Debug, Clone)]
 pub struct TrackBoundary {
@@ -317,8 +402,6 @@ async fn track_info_task(track_tx: mpsc::Sender<TrackBoundary>, ui_tx: watch::Se
 }
 
 async fn fetch_current_track(api_url: &str) -> Result<TrackBoundary, Box<dyn std::error::Error + Send + Sync>> {
-    println!("🌐 Fetching track info from: {}", api_url);
-    
     // Create HTTP client with timeout
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -452,21 +535,34 @@ fn audio_playback_thread(
     
     // Create sink for playback
     let sink = rodio::Sink::connect_new(stream_handle.mixer());
-
-    let source = rodio::Decoder::builder()
-    .with_hint("aac")
-    .with_gapless(false)
-    .with_seekable(false)
-    .with_data(audio_receiver);
-
-    sink.append(source);
-    sink.sleep_until_end();
-
-    Ok(());
+    
+    // Create streaming reader that implements Read + Seek
+    let streaming_reader = StreamingReader::new(audio_receiver);
+    
+    // Create decoder using Rodio's built-in Symphonia integration
+    match rodio::Decoder::new(streaming_reader) {
+        Ok(source) => {
+            println!("✅ Rodio decoder created successfully");
+            
+            // Append the decoded source to the sink
+            sink.append(source);
+            
+            // Update UI to show we're playing
+            let mut state = ui_tx.borrow().clone();
+            state.is_playing = true;
+            let _ = ui_tx.send(state);
+            
+            // Sleep until playback ends (keeps the sink alive)
+            println!("🎵 Starting audio playback - sleeping until end");
+            sink.sleep_until_end();
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to create Rodio decoder: {}", e);
+            return;
+        }
+    }
+    
     println!("🔇 Audio playback thread ending");
-
-    
-    
 }
 
 mod ui {
